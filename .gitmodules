@@ -1,0 +1,3 @@
+[submodule "jeezson"]
+	path = jeezson
+	url = https://github.com/zsugabubus/jeezson
