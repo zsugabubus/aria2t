@@ -9,13 +9,13 @@ BUILD ?= debug
 
 CFLAGS += -std=c89 -g -O0 -D_GNU_SOURCE -pedantic -Wall -Wextra -Werror -Wno-unused-function  -Wno-unused-variable -Wno-unused-parameter
 
-PACKAGES := ncurses
+PACKAGES := ncursesw
 
 LDLIBS += $(shell $(PKGCONFIG) --libs $(PACKAGES))
 LDFLAGS += $(shell $(PKGCONFIG) --cflags $(PACKAGES))
 
-aria2t: main.c rpc.c jeezson/jeezson.c jeezson/jeezson.h Makefile
-	$(CC) -o $@ $(CFLAGS) $(LDLIBS) $(LDFLAGS) main.c rpc.c jeezson/jeezson.c
+aria2t: main.c format.c websocket.c jeezson/jeezson.c jeezson/jeezson.h Makefile
+	$(CC) -o $@ $(CFLAGS) $(LDLIBS) $(LDFLAGS) main.c format.c websocket.c jeezson/jeezson.c
 
 .PHONY: bootstrap
 bootstrap:
