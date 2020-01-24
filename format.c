@@ -53,11 +53,14 @@ fmt_decimal(char *str, uint64_t n, char const *UNITS, uint64_t const *BASE) {
 	while (n >= BASE[++i])
 		;
 
-	n *= 1000;
+	n *= BASE[2];
 	n /= (BASE - 1)[i];
 
-	if (n >= 10000U) {
-		n /= 1000U;
+	if (' ' == (UNITS - 1)[i])
+		*str++ = ' ';
+
+	if (n >= 10 * BASE[2] || 1 == (BASE - 1)[i]) {
+		n /= BASE[2];
 		str[0] = n >= 100U ? '0' +  (n / 100U)        : ' ';
 		str[1] = n >= 10U  ? '0' + ((n % 100U) / 10U) : ' ';
 		str[2] = '0' + (n % 10U);
@@ -67,7 +70,9 @@ fmt_decimal(char *str, uint64_t n, char const *UNITS, uint64_t const *BASE) {
 		str[1] = '.';
 		str[2] = '0' + (n % 10U);
 	}
-	str[3] = (UNITS - 1)[i];
+
+	if (' ' != (UNITS - 1)[i])
+		str[3] = (UNITS - 1)[i];
 
 	return 4;
 }
@@ -106,27 +111,34 @@ fmt_number(char *str, uint64_t num) {
 	}
 }
 
-int fmt_percent(char *str, uint64_t cnt, uint64_t div) {
-	uint16_t p = cnt * 10000UL / div;
-	if (p < 10) {
+int fmt_percent(char *str, uint64_t num, uint64_t total) {
+#define PERCENT * 100
+	uint32_t p = num * (uint64_t)(100 PERCENT) / total;
+	if (p < 10 PERCENT) {
 		str[0] = '0' + (p / 100);
 		str[1] = '.';
 		str[2] = '0' + (p / 10 % 10);
 		str[3] = '0' + (p % 10);
 		str[4] = '%';
-	} else if (p < 100) {
-		p /= 10;
+	} else if (p < 100 PERCENT) {
+		p /= 10; /* Drop one decimal. */
 		str[0] = '0' + (p / 100);
 		str[1] = '0' + (p / 10 % 10);
 		str[2] = '.';
 		str[3] = '0' + (p % 10);
 		str[4] = '%';
+	} else if (p < 10000 PERCENT) {
+		p /= 100; /* Drop two decimals. */
+		str[0] = p < 1000 ? ' ' : '0' + (p / 1000 % 10);
+		str[1] = '0' + (p / 100 % 10);
+		str[2] = '0' + (p / 10 % 10);
+		str[3] = '0' + (p % 10);
+		str[4] = '%';
 	} else {
-		str[0] = ' ';
-		str[1] = 'a';
-		str[2] = 'l';
-		str[3] = 'l';
-		str[4] = ' ';
+		p /= 100 PERCENT;
+		str[0] = 'x';
+		return 1 + fmt_number(str + 1, p);
 	}
+#undef PERCENT
 	return 5;
 }

@@ -24,8 +24,8 @@ struct aria_peer {
 
 	int rx_choked;
 	int tx_choked;
-	uint32_t rx_speed;
-	uint32_t tx_speed;
+	uint32_t download_speed;
+	uint32_t upload_speed;
 };
 
 struct aria_download {
@@ -38,13 +38,16 @@ struct aria_download {
 	uint32_t num_pieces;
 	uint32_t piece_size;
 
+	uint32_t num_seeders;
+	uint32_t num_connections;
+
 	uint64_t total_size;
 	uint64_t have;
 	uint64_t uploaded;
 	char *progress;
 
-	uint32_t rx_speed;
-	uint32_t tx_speed;
+	uint32_t download_speed;
+	uint32_t upload_speed;
 
 	struct aria_file *files;
 
@@ -52,8 +55,8 @@ struct aria_download {
 
 
 struct aria_globalstat {
-	uint64_t rx_speed;
-	uint64_t tx_speed;
+	uint64_t download_speed;
+	uint64_t upload_speed;
 
 	uint32_t num_active;
 	uint32_t num_waiting;

@@ -7,7 +7,7 @@ LIBDIR = $(PREFIX)/lib
 
 BUILD ?= debug
 
-CFLAGS += -std=c89 -g -O0 -D_GNU_SOURCE -pedantic -Wall -Wextra -Werror -Wno-unused-function  -Wno-unused-variable -Wno-unused-parameter
+CFLAGS += -std=c89 -g -O2 -D_GNU_SOURCE -pedantic -Wall -Wextra -Werror -Wno-unused-function  -Wno-unused-variable -Wno-unused-parameter
 
 PACKAGES := ncursesw
 

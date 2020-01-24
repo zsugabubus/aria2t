@@ -1,5 +1,6 @@
 #ifndef FORMAT_H
 #define FORMAT_H
+
 #include <stdint.h>
 
 int
@@ -14,6 +15,16 @@ fmt_space(char *str, uint64_t num);
 int
 fmt_number(char *str, uint64_t num);
 
-int fmt_percent(char *str, uint64_t cnt, uint64_t div);
+int
+fmt_percent(char *str, uint64_t num, uint64_t total);
 
+static int
+fmt_white(char *str, int n) {
+	int i = 0;
+
+	while (i < n)
+		str[i++] = ' ';
+
+	return n;
+}
 #endif
