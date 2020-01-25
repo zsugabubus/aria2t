@@ -585,7 +585,7 @@ static int rpc_on_error(struct json_node *error) {
 	flushinp();
 	refresh();
 
-	return 1;
+	return 0;
 }
 
 static int rpc_on_action(struct json_node *result, void *data) {
