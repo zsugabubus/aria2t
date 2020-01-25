@@ -65,7 +65,7 @@ fmt_decimal(char *str, uint64_t n, char const *UNITS, uint64_t const *BASE) {
 		str[1] = n >= 10U  ? '0' + ((n % 100U) / 10U) : ' ';
 		str[2] = '0' + (n % 10U);
 	} else {
-		n /= 100U;
+		n /= BASE[2] / 10U;
 		str[0] = '0' + (n / 10U);
 		str[1] = '.';
 		str[2] = '0' + (n % 10U);
@@ -100,20 +100,12 @@ static uint64_t const NUMBER_BASE[] = { 1, 1e0, 1e3, 1e6, 1e9, 1e12 };
 
 int
 fmt_number(char *str, uint64_t num) {
-	if (num > 0) {
-		return fmt_decimal(str, num, NUMBER_UNITS, NUMBER_BASE);
-	} else {
-		str[0] = 'n';
-		str[1] = 'o';
-		str[2] = 'n';
-		str[3] = 'e';
-		return 4;
-	}
+	return fmt_decimal(str, num, NUMBER_UNITS, NUMBER_BASE);
 }
 
 int fmt_percent(char *str, uint64_t num, uint64_t total) {
 #define PERCENT * 100
-	uint32_t p = num * (uint64_t)(100 PERCENT) / total;
+	uint32_t p = total > 0 ? num * (uint64_t)(100 PERCENT) / total : 0;
 	if (p < 10 PERCENT) {
 		str[0] = '0' + (p / 100);
 		str[1] = '.';

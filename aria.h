@@ -33,6 +33,7 @@ struct aria_download {
 
 	char const*name;
 	char gid[16 + 1];
+	/* DOWNLOAD_*; Negative if changed. */
 	int status;
 	uint32_t num_files;
 	uint32_t num_pieces;

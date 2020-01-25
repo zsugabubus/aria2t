@@ -1,20 +1,19 @@
-
-INSTALL ?= install
-RMDIR ?= rmdir
-PKGCONFIG ?= pkg-config
+#!/usr/bin/make -f
 PREFIX ?= /usr/local
-LIBDIR = $(PREFIX)/lib
+MANPREFIX ?= /usr/share/man
+INSTALL ?= install
+GZIP ?= gzip
+PKGCONFIG ?= pkg-config
 
-BUILD ?= debug
-
-CFLAGS += -std=c89 -g -O2 -D_GNU_SOURCE -pedantic -Wall -Wextra -Werror -Wno-unused-function  -Wno-unused-variable -Wno-unused-parameter
+TARGET := aria2t
+CFLAGS += -std=c89 -g -O2 -pedantic -Wall -Wextra -Werror
 
 PACKAGES := ncursesw
 
 LDLIBS += $(shell $(PKGCONFIG) --libs $(PACKAGES))
 LDFLAGS += $(shell $(PKGCONFIG) --cflags $(PACKAGES))
 
-aria2t: main.c format.c websocket.c jeezson/jeezson.c jeezson/jeezson.h Makefile
+$(TARGET): main.c format.c websocket.c jeezson/jeezson.c jeezson/jeezson.h Makefile
 	$(CC) -o $@ $(CFLAGS) $(LDLIBS) $(LDFLAGS) main.c format.c websocket.c jeezson/jeezson.c
 
 .PHONY: bootstrap
@@ -22,14 +21,18 @@ bootstrap:
 	git submodule update --init
 
 .PHONY: run
-run: aria2t
+run: $(TARGET)
 	./$^
 
 .PHONY: install
 install:
+	$(INSTALL) -Ds $(TARGET) $(DESTDIR)$(PREFIX)
+	$(INSTALL) -D $(TARGET).1 $(DESTDIR)$(MANPREFIX)/man1/
 
 .PHONY: uninstall
 uninstall:
+	rm -f $(DESTDIR)$(PREFIX)/$(TARGET) $(DESTDIR)$(MANPREFIX)/man1/$(TARGET).1
 
 .PHONY: clean
 clean:
+	rm -f $(TARGET)

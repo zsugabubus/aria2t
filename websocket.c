@@ -1,9 +1,4 @@
-/* Hardwired JSON-RPC over WebSocket implementation for Aria2c.
- *
- * Losely has something to do with the following specifications:
- * - [WebSocket](https://tools.ietf.org/html/rfc6455),
- * - [JSON-RPC](https://www.jsonrpc.org/specification).
- * */
+/* A minimal WebSocket implementation. */
 #include <stdlib.h>
 #include <openssl/sha.h>
 #include <openssl/rand.h>
@@ -27,6 +22,7 @@ int ws_fd;
 int ws_fd_sflags;
 
 #define HTTP_SWITCHING_PROTOCOLS "HTTP/1.1 101 "
+
 static uint8_t hdrlen;
 static unsigned char hdrbuf[2 + 8 + 4];
 static char *msgbuf = NULL;
@@ -47,7 +43,7 @@ int ws_connect(void)
 {
 	struct addrinfo hints;
 	struct addrinfo *addrs, *p;
-	int res;
+	int err;
 	char ws_port_str[sizeof "65536"];
 
 	memset(&hints, 0, sizeof hints);
@@ -58,10 +54,10 @@ int ws_connect(void)
 
 	sprintf(ws_port_str, "%hu", ws_port);
 
-	if ((res = getaddrinfo(ws_host, ws_port_str, &hints, &addrs))) {
+	if ((err = getaddrinfo(ws_host, ws_port_str, &hints, &addrs))) {
 		fprintf(stderr, "could'n resolve %s:%s: %s\n",
 				ws_host, ws_port_str,
-				gai_strerror(res));
+				gai_strerror(err));
 		return 1;
 	}
 
@@ -160,7 +156,6 @@ int writeall(void const *buf, size_t nbyte) {
 
 static int ws_http_upgrade(void)
 {
-	int r;
 	char buf[147 + 256];
 	size_t len;
 
@@ -312,7 +307,7 @@ static int ws_process_chunk(char *buf, size_t len) {
 
 				/* printf("frame hdr parsed; hdrlen=%d paylen=%d %x %x\n", hdrlen, (int)payloadlen, hdrbuf[0], hdrbuf[1]); */
 				if (hdrbuf[1] & 0x80)
-				assert(!"mask not expected");
+					assert(!"mask not expected");
 
 				assert(msgsize == msglen);
 				msgsize = msglen + payloadlen;
@@ -387,8 +382,10 @@ int ws_read(void)
 			}
 			break;
 		}
-		if (len == 0)
+		if (len == 0) {
+			result = -1;
 			break;
+		}
 
 		if ((result = ws_process_chunk(buf, (size_t)len)))
 			break;

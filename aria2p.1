@@ -1,0 +1,85 @@
+.TH ARIA2T 1 "25 Januar 2020"
+.SH NAME
+aria2t \- an aria2c frontend
+
+.SH SYNOPSIS
+.SY aria2t
+
+.SH DESCRIPTION
+.B aria2t
+is an low footprint frontend for aria2c(1).
+.sp
+It does not provide any customization options besides environment variables. See
+.I ENVIRONMENT
+section for how to specify a remote endpoint.
+
+.SH KEYBOARD CONTROL
+.
+.TP
+.B k, UP
+Select line above.
+.
+.TP
+.B j, DOWN
+Select line below.
+.
+.TP
+.B g
+Select first line.
+.
+.TP
+.B G
+Select last line.
+.
+.TP
+.B p, SPACE
+Toggle paused state of the selected download.
+.
+.TP
+.B P
+On an unpaused download pause all, on a paused download unpause all.
+.
+.TP
+.B F9
+Shutdown
+.IR aria2c
+server\&.
+.
+.TP
+.B q
+Quit program.
+.
+.TP
+.B Ctrl-c
+Quit program with failure.
+
+.SH ENVIRONMENT
+.
+.TP
+.I ARIA_RPC_HOST
+Hostname of the JSON-RPC endpoint to connect to.
+.sp
+Default:
+.IR 127.0.0.1 \&.
+.
+.TP
+.I ARIA_RPC_PORT
+Port number of the JSON-RPC endpoint to connect to.
+.sp
+Default:
+.IR 6800 \&.
+.
+.TP
+.I ARIA_RPC_SECRET
+RPC secret token that required for authentication. See
+.I rpc-secret=
+option in aria2c(1)\&.
+.sp
+Default: (empty).
+
+.SH BUGS
+Please report bugs to
+\%https://github.com/zsugabubus/aria2t/issues.
+
+.SH SEE ALSO
+.BR aria2c(1)

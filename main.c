@@ -9,7 +9,9 @@
 #include <errno.h>
 #ifdef __linux__
 #include <sys/signalfd.h>
+#include <sys/prctl.h>
 #endif
+#include <sys/wait.h>
 
 #include <locale.h>
 #include <ncurses.h>
@@ -18,139 +20,325 @@
 #include "format.h"
 #include "jeezson/jeezson.h"
 
+#define ctrl(x) ((x) & 0x1f)
 #define array_len(arr) (sizeof arr / sizeof *arr)
 
 static struct json_node *nodes;
 static size_t nnodes;
 static char *aria_token;
-typedef int(*rpc_msg_handler)(struct json_node *error, struct json_node *result, void *data);
+typedef int(*rpc_msg_handler)(struct json_node *result, void *data);
 static struct rpc_handler {
 	rpc_msg_handler func;
 	void *data;
 } rpc_handlers[10];
 
-struct json_writer jw[1];
+static int namecol;
+static int retcode = EXIT_SUCCESS;
 
-static enum {
-	sort_index = 0,
-	sort_name,
-	sort_progress,
-	sort_remaining,
-	sort_txspeed,
-	sort_rxspeed
-} sortkey;
-struct aria_globalstat globalstat;
-struct aria_download *downloads;
-size_t num_downloads;
+static struct json_writer jw[1];
+
+static struct aria_globalstat globalstat;
+static struct aria_download *downloads;
+static size_t num_downloads;
+static size_t selidx = SIZE_MAX;
+static size_t firstidx = 0;
+
+static char const *program_name;
+
+#define COLOR_DOWN 1
+#define COLOR_UP   2
+#define COLOR_PEER 4
+#define COLOR_GOOD 0
+#define COLOR_BAD  0
+#define COLOR_EOF  7
 
 void shellout() {
-    /* def_prog_mode_sp(client->scr);
-    endwin();
-    (shellprg = getenv("SHELL")) || (shellprg = "sh");
-    system(shellprg);
-    refresh(); */
+	char *editor;
+	pid_t pid;
+	char filepath[256];
+	char *tmp = getenv("TMP");
+	int file;
+#ifdef __linux__
+	int ppid = getpid();
+#endif
+
+	def_prog_mode();
+	endwin();
+
+	if (NULL == (editor = getenv("EDITOR")))
+		assert(0);
+
+	snprintf(filepath, sizeof filepath, "/%s/%s.XXXXXX",
+			NULL != tmp ? tmp : "tmp",
+			program_name);
+	if (-1 == (file = mkstemp(filepath)))
+		assert(0);
+
+	if (0 == (pid = fork())) {
+#ifdef __linux__
+		(void)prctl(PR_SET_PDEATHSIG, SIGKILL);
+		/* Has been reparented since. */
+		if (getppid() != ppid)
+			raise(SIGKILL);
+#endif
+
+		execlp(editor, editor, filepath, NULL);
+		_exit(127);
+	}
+
+	while (-1 == waitpid(pid, NULL, 0) && errno == EINTR)
+		;
+
+	unlink(filepath);
+
+	refresh();
 }
 
 static int ar_redraw_globalstat(void) {
-	size_t y;
+	int y, x, w;
 	char fmtbuf[5];
 	int n;
-	int x;
 
-	getmaxyx(stdscr, y, x);
+	getmaxyx(stdscr, y, w);
 
-	--y;
+	--y, x = 0;
+
+	move(y, 0);
+	/* Downloads number widget. */
+	attr_set(A_NORMAL, COLOR_GOOD, NULL);
+	addstr(" 契");
+
+	n = fmt_number(fmtbuf, globalstat.num_active);
+	addnstr(fmtbuf, n);
+
+	if (globalstat.num_waiting > 0) {
+		attr_set(A_NORMAL, 0, NULL);
+		addstr("+");
+		attr_set(A_NORMAL, COLOR_GOOD, NULL);
+
+		n = fmt_number(fmtbuf, globalstat.num_waiting);
+		addnstr(fmtbuf, n);
+	}
+	attr_set(A_NORMAL, 0, NULL);
+
+	addstr(" 栗");
+
+	attr_set(A_NORMAL, COLOR_BAD, NULL);
+	n = fmt_number(fmtbuf, globalstat.num_stopped);
+	addnstr(fmtbuf, n);
+
+	if (globalstat.num_stopped_total > globalstat.num_stopped) {
+		attr_set(A_NORMAL, 0, NULL);
+		addstr("+");
+		attr_set(A_NORMAL, COLOR_BAD, NULL);
+
+		n = fmt_number(fmtbuf, globalstat.num_stopped_total - globalstat.num_stopped);
+		addnstr(fmtbuf, n);
+	}
+	attr_set(A_NORMAL, 0, NULL);
+
+	clrtoeol();
+
+	x = w;
+	mvaddstr(y, x -= 1, " ");
 
 	/* Upload speed widget. */
 	if (globalstat.upload_speed > 0)
-		attr_set(A_BOLD, 2, NULL);
-
-	mvaddstr(y, x -= 1, " ");
-
+		attr_set(A_BOLD, COLOR_UP, NULL);
 	n = fmt_speed(fmtbuf, globalstat.upload_speed);
 	mvaddnstr(y, x -= n, fmtbuf, n);
 
 	mvaddstr(y, x -= 3, "  ");
-
-	attr_set(A_NORMAL, -1, NULL);
+	attr_set(A_NORMAL, 0, NULL);
 
 	/* Download speed widget. */
 	if (globalstat.download_speed > 0)
-		attr_set(A_BOLD, 1, NULL);
-
+		attr_set(A_BOLD, COLOR_DOWN, NULL);
 	n = fmt_speed(fmtbuf, globalstat.download_speed);
 	mvaddnstr(y, x -= n, fmtbuf, n);
 
 	mvaddstr(y, x -= 3, "  ");
-
-	attr_set(A_NORMAL, -1, NULL);
+	attr_set(A_NORMAL, 0, NULL);
 
 	return 0;
 }
 
-static int download_cmp_byuploadspeed(struct aria_download const*one, struct aria_download const*other) {
-	int diff;
-	uint64_t x = one->uploaded * 1000 / one->total_size;
-	uint64_t y = other->uploaded * 1000 / other->total_size;
+static int download_comparator(struct aria_download const*this, struct aria_download const*other) {
+	int cmp;
+	uint64_t x, y;
+	int this_status = abs(this->status);
+	int other_status = abs(other->status);
 
-	if (x > y)
-		return -1;
-	else if (x < y)
-		return 1;
+	/* Prefer removed downloads. */
+	cmp = (DOWNLOAD_REMOVED == other_status) -
+		(DOWNLOAD_REMOVED == this_status);
+	if (cmp)
+		return cmp;
 
-	/* if ((diff = other->upload_speed - one->upload_speed))
-		return diff; */
+	/* Prefer incomplete downloads. */
+	cmp = (DOWNLOAD_ACTIVE == other_status) -
+		(DOWNLOAD_ACTIVE == this_status);
+	if (cmp)
+		return cmp;
 
-	return 0;
+	/* Prefer active downloads that almost downloaded. */
+	/* NOTE: total_size can be null for example in cases if there is no
+	 * information about the download. */
+	x = DOWNLOAD_ACTIVE == this_status && this->total_size > 0
+		? this->have * 10000 / this->total_size
+		: 0;
+	y = DOWNLOAD_ACTIVE == other_status && other->total_size > 0
+		? other->have * 10000 / other->total_size
+		: 0;
+	if (x != y)
+		return x > y ? -1 : 1;
+
+	/* Prefer waiting downloads. */
+	cmp = (DOWNLOAD_WAITING == other_status) -
+		(DOWNLOAD_WAITING == this_status);
+	if (cmp)
+		return cmp;
+
+	/* Prefer downloads higher upload speed. */
+	if (this->upload_speed != other->upload_speed)
+		return this->upload_speed > other->upload_speed ? -1 : 1;
+
+	/* Prefer downloads with better upload ratio. */
+	x = this->total_size > 0
+		? this->uploaded * 10000 / this->total_size
+		: 0;
+	y = other->total_size > 0
+		? other->uploaded * 10000 / other->total_size
+		: 0;
+	if (x != y)
+		return x > y ? -1 : 1;
+
+	/* Prefer completed and active downloads. */
+	cmp = (DOWNLOAD_COMPLETE == other_status ||
+		DOWNLOAD_ACTIVE == other_status) -
+		(DOWNLOAD_COMPLETE == this_status ||
+		DOWNLOAD_ACTIVE == this_status);
+	if (cmp)
+		return -cmp;
+
+	return strcmp(this->name, other->name);
+}
+
+static struct aria_download *find_download_bygid(char *gid) {
+	struct aria_download *d = downloads;
+	struct aria_download *const end = &downloads[num_downloads];
+
+	for (;d < end; ++d)
+		if (0 == memcmp(d->gid, gid, sizeof d->gid))
+			return d;
+	return NULL;
 }
 
 static void ar_redraw(void);
 
-static void ar_downloads_changed(void) {
-	qsort(downloads, num_downloads, sizeof *downloads, (int(*)(void const*,void const*))download_cmp_byuploadspeed);
+static void ar_scroll_changed(void) {
 	ar_redraw();
 }
 
-static int ar_redraw_download(struct aria_download *d) {
-	size_t y = d - downloads;
+static void ar_cursor_changed(void) {
+	int show = num_downloads > 0 && selidx != SIZE_MAX;
+	int h = getmaxy(stdscr);
+	size_t oldfirstidx = firstidx;
+
+	(void)curs_set(show);
+
+	if (!show)
+		return;
+
+	/* Scroll selection into view. */
+	if (selidx < firstidx)
+		firstidx = selidx;
+	if (firstidx + h - 1 <= selidx)
+		firstidx = selidx - (h - 2);
+	if (firstidx + h - 1 >= num_downloads)
+		firstidx = num_downloads > (size_t)(h - 1) ? num_downloads - (size_t)(h - 1) : 0;
+
+	if (firstidx == oldfirstidx) {
+		move(selidx - firstidx, namecol);
+	} else {
+		ar_scroll_changed();
+	}
+}
+
+static void ar_downloads_changed(void) {
+	char selgid[sizeof ((struct aria_download *)0)->gid];
+
+	if (SIZE_MAX != selidx)
+		memcpy(selgid, downloads[selidx].gid, sizeof selgid);
+
+	qsort(downloads, num_downloads, sizeof *downloads, (int(*)(void const*,void const*))download_comparator);
+
+	if (SIZE_MAX != selidx &&
+		0 != memcmp(selgid, downloads[selidx].gid, sizeof selgid)) {
+		struct aria_download *d = find_download_bygid(selgid);
+
+		assert(NULL != d);
+		selidx = d - downloads;
+	}
+
+	ar_redraw();
+}
+
+
+static void ar_redraw_download(struct aria_download *d, int y) {
+	int x;
 	char fmtbuf[5];
 	int n;
-	int x = 0;
 
-	mvaddnstr(y, x, d->gid, 5);
-	x += 5 + 1;
+	if (num_downloads < 10)
+		n = 2;
+	else if (num_downloads < 100)
+		n = 3;
+	else if (num_downloads < 1000)
+		n = 4;
+	else if (num_downloads < 10000)
+		n = 5;
+	else
+		n = 7;
 
-	switch (d->status) {
+	attr_set(A_NORMAL, -1, NULL);
+	x = 0;
+	mvaddnstr(y, x, d->gid, n), x += n;
+	mvaddstr(y, x, " "), x += 1;
+
+	attr_set(A_BOLD, -1, NULL);
+	switch (abs(d->status)) {
 	case DOWNLOAD_REMOVED:
-		mvaddstr(y, x, "x");
-		x += 2;
+		mvaddstr(y, x, "x "), x += 2;
+		attr_set(A_NORMAL, 0, NULL);
 		break;
 	case DOWNLOAD_ERROR:
-		mvaddstr(y, x, "E");
-		x += 2;
+		mvaddstr(y, x, "E "), x += 2;
+		attr_set(A_NORMAL, 0, NULL);
 		break;
+		for (;;) {
 	case DOWNLOAD_WAITING:
-		mvaddstr(y, x, "w");
-		x += 2;
-		break;
+			mvaddstr(y, x, "w ");
+			break;
 	case DOWNLOAD_PAUSED:
-		if (d->have != d->total_size) {
-			mvaddstr(y, x, "P");
-		} else {
-			mvaddstr(y, x, "p");
+			mvaddstr(y, x, "| ");
+			break;
+	case DOWNLOAD_COMPLETE:
+			mvaddstr(y, x, ". ");
+			break;
 		}
 		x += 2;
-		break;
-	case DOWNLOAD_COMPLETE:
-		mvaddstr(y, x, ".");
-		x += 2;
+		attr_set(A_NORMAL, 0, NULL);
 
-		n = fmt_space(fmtbuf, d->have);
-		mvaddnstr(y, x, fmtbuf, n);
-		x += n;
+		n = fmt_space(fmtbuf, d->total_size);
+		mvaddnstr(y, x, fmtbuf, n), x += n;
 
-		mvaddstr(y, x, " (");
-		x += 2;
+		mvaddstr(y, x, "["), x += 1;
+
+		n = fmt_percent(fmtbuf, d->have, d->total_size);
+		mvaddnstr(y, x, fmtbuf, n), x += n;
+
+		mvaddstr(y, x, "] ("), x += 3;
 
 		if (d->num_files > 0) {
 			n = fmt_number(fmtbuf, d->num_files);
@@ -161,115 +349,128 @@ static int ar_redraw_download(struct aria_download *d) {
 			fmtbuf[3] = '?';
 			n = 4;
 		}
-		mvaddnstr(y, x, fmtbuf, n);
-		x += n;
+		mvaddnstr(y, x, fmtbuf, n), x += n;
 
-		mvaddstr(y, x, " files)");
-		x += 7;
+		mvaddstr(y, x, " files)"), x += 7;
 
-		mvaddstr(y, x, "              ");
-		x += 3 + 4 + 3 + 4;
+		mvaddstr(y, x, "       "), x += 3 + 3;
 		break;
 	case DOWNLOAD_ACTIVE:
-		mvaddstr(y, x, ">");
-		x += 2;
-
-		n = fmt_percent(fmtbuf, d->have, d->total_size);
-		mvaddnstr(y, x, fmtbuf, n);
-		x += n;
+		mvaddstr(y, x, "> ");
+		attr_set(A_NORMAL, 0, NULL), x += 2;
 
 		if (d->download_speed > 0) {
-			mvaddstr(y, x, " @ ");
-			x += 3;
+			attr_set(A_BOLD, COLOR_DOWN, NULL);
 
-			attr_set(A_BOLD, 1, NULL);
-			mvaddstr(y, x, "  ");
-			x += 3;
+			n = fmt_percent(fmtbuf, d->have, d->total_size);
+			mvaddnstr(y, x, fmtbuf, n), x += n;
+
+			attr_set(A_NORMAL, 0, NULL);
+
+			mvaddstr(y, x, " @ "), x += 3;
+
+			attr_set(A_BOLD, COLOR_DOWN, NULL);
+			mvaddstr(y, x, "  "), x += 3;
 
 			n = fmt_speed(fmtbuf, d->download_speed);
-			mvaddnstr(y, x, fmtbuf, n);
-			x += n;
+			mvaddnstr(y, x, fmtbuf, n), x += n;
 			/* mvaddstr(y, x, "/"); */
 			attr_set(A_NORMAL, -1, NULL);
 		} else {
-			mvaddstr(y, x, " ");
-			x += 1;
+			n = fmt_space(fmtbuf, d->total_size);
+			mvaddnstr(y, x, fmtbuf, n), x += n;
 
-			if (d->num_seeders > 0)
+			mvaddstr(y, x, "["), x += 1;
+
+			attr_set(d->have == d->total_size ? A_NORMAL : A_BOLD, COLOR_DOWN, NULL);
+
+			n = fmt_percent(fmtbuf, d->have, d->total_size);
+			mvaddnstr(y, x, fmtbuf, n), x += n;
+
+			attr_set(A_NORMAL, 0, NULL);
+
+			mvaddstr(y, x, "] "), x += 2;
+
+			/* if (d->num_seeders > 0)
 				n = fmt_number(fmtbuf, d->num_seeders);
 			else
 				n = fmt_white(fmtbuf, 4);
 			mvaddnstr(y, x, fmtbuf, n);
-			x += n;
+			x += n; */
 
-			mvaddstr(y, x, " ");
-			x += 1;
-
-			if (d->num_connections > 0)
+			attr_set(A_NORMAL, COLOR_PEER, NULL);
+			if (d->num_connections > 0) {
 				n = fmt_number(fmtbuf, d->num_connections);
-			else
-				n = fmt_white(fmtbuf, 4);
-			mvaddnstr(y, x, fmtbuf, n);
-			x += n;
+				mvaddnstr(y, x, fmtbuf, n), x += n;
+			} else {
+				mvaddstr(y, x, "    "), x += 4;
+			}
+
+			attr_set(A_NORMAL, 0, NULL);
 		}
 
 		if (d->uploaded > 0) {
 			if (d->upload_speed > 0)
-				attr_set(A_BOLD, 2, NULL);
-			mvaddstr(y, x, "  ");
-			x += 3;
+				attr_set(A_BOLD, COLOR_UP, NULL);
+			mvaddstr(y, x, "  "), x += 3;
 
 			n = fmt_space(fmtbuf, d->uploaded);
-			mvaddnstr(y, x, fmtbuf, n);
-			x += n;
+			mvaddnstr(y, x, fmtbuf, n), x += n;
 
 			if (d->upload_speed > 0) {
-				mvaddstr(y, x, " @ ");
-				x += 3;
+				mvaddstr(y, x, " @ "), x += 3;
 
 				n = fmt_speed(fmtbuf, d->upload_speed);
-				mvaddnstr(y, x, fmtbuf, n);
-				x += n;
+				mvaddnstr(y, x, fmtbuf, n), x += n;
 			} else {
-				mvaddstr(y, x, "[");
-				x += 1;
+				mvaddstr(y, x, "["), x += 1;
+
+				attr_set(A_NORMAL, COLOR_UP, NULL);
 
 				n = fmt_percent(fmtbuf, d->uploaded, d->total_size);
-				mvaddnstr(y, x, fmtbuf, n);
-				x += n;
-				mvaddstr(y, x, "]");
-				x += 1;
+				mvaddnstr(y, x, fmtbuf, n), x += n;
+
+				attr_set(A_NORMAL, 0, NULL);
+
+				mvaddstr(y, x, "]"), x += 1;
 			}
 
 			if (d->upload_speed > 0)
 				attr_set(A_NORMAL, -1, NULL);
 		} else {
-			mvaddstr(y, x, "              ");
-			x += 3 + 4 + 3 + 4;
+			mvaddstr(y, x, "              "), x += 3 + 4 + 3 + 4;
 		}
 
 		break;
 	}
 
-	mvaddstr(y, 39, d->name);
-	return 0;
+	mvaddstr(y, x, " "), x += 1;
+	namecol = x;
+	mvaddstr(y, x, d->name);
+	clrtoeol();
 }
 
 static void ar_redraw(void) {
-	struct aria_download *d = downloads;
-	struct aria_download *const end = &downloads[num_downloads];
+	int line = 0, height = getmaxy(stdscr) - 1/*status line*/;
 
-	for (;d < end; ++d)
-		ar_redraw_download(d);
+	for (;line < height; ++line) {
+		if (firstidx + line < num_downloads) {
+			ar_redraw_download(&downloads[firstidx + line], line);
+		} else {
+			attr_set(A_NORMAL, COLOR_EOF, NULL);
+			mvaddstr(line, 0, "~");
+			attr_set(A_NORMAL, 0, NULL);
+			clrtoeol();
+		}
+	}
 
 	ar_redraw_globalstat();
 
-	refresh();
+	ar_cursor_changed();
 }
 
 static struct aria_download *download_alloc(void) {
 	void *p = realloc(downloads, (num_downloads + 1) * sizeof *downloads);
-	struct aria_download *d;
 
 	if (NULL == p)
 		return NULL;
@@ -300,7 +501,7 @@ static void rpc_parse_download_files(struct aria_download *d, struct json_node *
 			else if (0 == strcmp(field->key, "length"))
 				file.total_size = strtoull(field->val.str, NULL, 10);
 			else if (0 == strcmp(field->key, "completedLength"))
-				file.total_size = strtoull(field->val.str, NULL, 10);
+				file.have = strtoull(field->val.str, NULL, 10);
 			else if (0 == strcmp(field->key, "selected"))
 				file.selected = json_true == json_type(field);
 			else if (0 == strcmp(field->key, "uris"))
@@ -345,7 +546,7 @@ static void rpc_parse_download(struct aria_download *d, struct json_node *node) 
 				free((char *)d->name);
 			d->name = strdup(bt_name->val.str);
 		} else if (0 == strcmp(field->key, "status")) {
-#define IS(statusstr, STATUS) if (0 == strcmp(field->val.str, #statusstr)) d->status = DOWNLOAD_##STATUS
+#define IS(statusstr, STATUS) if (0 == strcmp(field->val.str, #statusstr)) d->status = -DOWNLOAD_##STATUS
 			IS(active, ACTIVE);
 			IS(waiting, WAITING);
 			IS(paused, PAUSED);
@@ -362,7 +563,7 @@ d->local = strto##type(field->val.str, NULL, 10);
 		else_if_FIELD(total_size, "totalLength", ull)
 		else_if_FIELD(have, "completedLength", ull)
 		else_if_FIELD(uploaded, "uploadLength", ull)
-		else_if_FIELD(num_seeders, "numSeeders", ul)
+		/* else_if_FIELD(num_seeders, "numSeeders", ul) */
 		else_if_FIELD(num_connections, "connections", ul)
 #undef else_if_FIELD
 	} while (NULL != (field = json_next(field)));
@@ -370,19 +571,53 @@ d->local = strto##type(field->val.str, NULL, 10);
 	assert(strlen(d->gid) == 16);
 }
 
-int rpc_on_populate(struct json_node *error, struct json_node *result, void *data) {
-	if (NULL == result)
-		return 0;
+static int rpc_on_error(struct json_node *error) {
+	struct json_node const *code = json_get(error, "code");
+	struct json_node const *message = json_get(error, "message");
+
+	def_prog_mode();
+	endwin();
+	fflush(stdout);
+
+	fprintf(stderr, "%s: %s:%u: RPC error %d: “%s”\n",
+			program_name,
+			ws_host, ws_port,
+			(int)code->val.num, message->val.str);
+	fflush(stderr);
+
+	getchar();
+
+	reset_prog_mode();
+	flushinp();
+	refresh();
+
+	return 1;
+}
+
+static int rpc_on_action(struct json_node *result, void *data) {
+	(void)result, (void)data;
+	return 0;
+}
+
+static int rpc_on_populate(struct json_node *result, void *data) {
+	(void)data;
 
 	result = json_children(result);
 	do {
-		struct json_node *method_list = json_children(result);
+		struct json_node *downloads_list;
 		struct json_node *node;
 
-		if (json_isempty(method_list))
+		if (json_arr != json_type(result)) {
+			rpc_on_error(result);
+			continue;
+		}
+
+		downloads_list = json_children(result);
+
+		if (json_isempty(downloads_list))
 			continue;
 
-		node = json_children(method_list);
+		node = json_children(downloads_list);
 		do {
 			struct aria_download *d = download_alloc();
 			if (NULL == d)
@@ -398,6 +633,12 @@ int rpc_on_populate(struct json_node *error, struct json_node *result, void *dat
 }
 
 static void rpc_parse_globalstat(struct json_node *node) {
+	if (json_arr != json_type(node))
+		return;
+
+	/* Returned object.  */
+	node = json_children(node);
+	/* First kv-pair.  */
 	node = json_children(node);
 	do {
 		if (0);
@@ -414,30 +655,16 @@ static void rpc_parse_globalstat(struct json_node *node) {
 		else
 			assert(!"unknown key in global stat");
 	} while (NULL != (node = json_next(node)));
-
-	ar_redraw_globalstat();
-	refresh();
 }
 
-static struct aria_download *find_download_bygid(char *gid) {
-	struct aria_download *d = downloads;
-	struct aria_download *const end = &downloads[num_downloads];
-
-	/* It's O(num_downloads) but I don't think it will cause any
-	 * performance problems. */
-	for (;d < end; ++d)
-		if (0 == memcmp(d->gid, gid, sizeof d->gid))
-			return d;
-	return NULL;
-}
-
-int rpc_on_periodic(struct json_node *error, struct json_node *result, void *data) {
-
+int rpc_on_periodic(struct json_node *result, void *data) {
 	int any_changed = 0;
+
+	(void)data;
 
 	/* Result is an array. Go to the first element. */
 	result = json_children(result);
-	rpc_parse_globalstat(json_children(result));
+	rpc_parse_globalstat(result);
 
 	result = json_next(result);
 	/* No more repsonses if no downloads. */
@@ -464,10 +691,10 @@ int rpc_on_periodic(struct json_node *error, struct json_node *result, void *dat
 		}
 	}
 
-	if (any_changed)
+	if (any_changed) {
 		ar_downloads_changed();
-	else
 		refresh();
+	}
 
 	return 0;
 }
@@ -498,27 +725,27 @@ static int rpc_on_notification(char const *method, struct json_node *event) {
 				memcpy(d->gid, gid, sizeof d->gid);
 		}
 		if (NULL != d)
-			d->status = DOWNLOAD_ACTIVE;
+			d->status = -DOWNLOAD_ACTIVE;
 
 	} else if (0 == strcmp(method, "aria2.onDownloadPause")) {
 		if (NULL != d)
-			d->status = DOWNLOAD_PAUSED;
+			d->status = -DOWNLOAD_PAUSED;
 
 	} else if (0 == strcmp(method, "aria2.onDownloadStop")) {
 		if (NULL != d)
-			d->status = DOWNLOAD_PAUSED;
+			d->status = -DOWNLOAD_PAUSED;
 
 	} else if (0 == strcmp(method, "aria2.onDownloadComplete")) {
 		if (NULL != d)
-			d->status = DOWNLOAD_COMPLETE;
+			d->status = -DOWNLOAD_COMPLETE;
 
 	} else if (0 == strcmp(method, "aria2.onDownloadError")) {
 		if (NULL != d)
-			d->status = DOWNLOAD_ERROR;
+			d->status = -DOWNLOAD_ERROR;
 
 	} else if (0 == strcmp(method, "aria2.onBtDownloadComplete")) {
 		if (NULL != d)
-			d->status = DOWNLOAD_COMPLETE;
+			d->status = -DOWNLOAD_COMPLETE;
 
 	} else {
 		assert(0);
@@ -526,6 +753,7 @@ static int rpc_on_notification(char const *method, struct json_node *event) {
 	}
 
 	ar_downloads_changed();
+	refresh();
 
 	return 0;
 }
@@ -535,14 +763,19 @@ int on_ws_message(char *msg, size_t msglen){
 	struct json_node *method;
 	int r;
 
+	(void)msglen;
+
 	json_parse(msg, &nodes, &nnodes);
 
 	if (NULL != (id = json_get(nodes, "id"))) {
 		struct json_node *const result = json_get(nodes, "result");
-		struct json_node *const error = NULL == result ? json_get(nodes, "error") : NULL;
 		struct rpc_handler *const handler = &rpc_handlers[(unsigned)id->val.num];
 
-		r = handler->func(error, result, handler->data);
+		if (NULL != result)
+			r = handler->func(result, handler->data);
+		else
+			r = rpc_on_error(json_get(nodes, "error"));
+
 		handler_free(handler);
 		if (r)
 			return r;
@@ -554,14 +787,6 @@ int on_ws_message(char *msg, size_t msglen){
 	} else {
 		assert(0);
 	}
-
-	/* if (NULL != error) {
-		struct json_node const *code = json_get(error, "code");
-		struct json_node const *message = json_get(error, "message");
-		fprintf(stderr, "aria2 error: %s (%d)\n",
-				message->val.str, (int)code->val.num);
-		exit(EXIT_FAILURE);
-	} */
 
 	/* json_debug(nodes, 0); */
 	/* json_debug(json_get(json_get(nodes, "result"), "version"), 0); */
@@ -589,11 +814,11 @@ static void writer_epilog() {
 	json_writer_free(jw);
 }
 
-void ar_populate(void) {
+static int ar_populate(void) {
 	unsigned n;
 	struct rpc_handler *handler = writer_prolog();
 	if (NULL == handler)
-		return;
+		return -1;
 
 	handler->func = rpc_on_populate;
 	handler->data = NULL;
@@ -657,7 +882,7 @@ void ar_populate(void) {
 		json_write_str(jw, "uploadSpeed");
 		json_write_str(jw, "downloadSpeed");
 		json_write_str(jw, "errorCode");
-		json_write_str(jw, "numSeeders");
+		/* json_write_str(jw, "numSeeders"); */
 		json_write_str(jw, "connections");
 		json_write_str(jw, "seeder");
 		json_write_str(jw, "bittorrent");
@@ -674,12 +899,13 @@ out_of_loop:
 	json_write_endarr(jw);
 
 	writer_epilog();
+	return 0;
 }
 
-void periodic(void) {
+static int periodic(void) {
 	struct rpc_handler *handler = writer_prolog();
 	if (NULL == handler)
-		return;
+		return -1;
 
 	handler->func = rpc_on_periodic;
 	handler->data = NULL;
@@ -705,9 +931,13 @@ void periodic(void) {
 		json_write_endobj(jw);
 	}
 	{
-		struct aria_download *d = downloads;
-		struct aria_download *const end = &downloads[num_downloads];
-		for (;d < end; ++d) {
+		struct aria_download *d = &downloads[firstidx];
+		int n = getmaxy(stdscr) - 1;
+
+		if (firstidx + n > num_downloads)
+			n = num_downloads - firstidx - 1;
+
+		for (;n-- > 0; ++d) {
 			json_write_beginobj(jw);
 			json_write_key(jw, "methodName");
 			json_write_str(jw, "aria2.tellStatus");
@@ -719,6 +949,10 @@ void periodic(void) {
 			json_write_str(jw, d->gid);
 			/* “keys” */
 			json_write_beginarr(jw);
+
+			if (DOWNLOAD_REMOVED == abs(d->status))
+				continue;
+
 			json_write_str(jw, "gid");
 			json_write_str(jw, "status");
 			if (NULL == d->name) {
@@ -735,29 +969,39 @@ void periodic(void) {
 				json_write_str(jw, "files");
 			}
 
-			/* TODO: Only if on-screen. */
-			switch (d->status) {
+			if (d->status < 0 && d->total_size == 0) {
+				json_write_str(jw, "totalLength");
+				json_write_str(jw, "completedLength");
+				json_write_str(jw, "uploadLength");
+				json_write_str(jw, "uploadSpeed");
+			}
+
+			switch (abs(d->status)) {
 			case DOWNLOAD_ERROR:
 				if (NULL == d->progress)
 					json_write_str(jw, "errorMessage");
 				break;
 			case DOWNLOAD_WAITING:
 			case DOWNLOAD_PAUSED:
-			case DOWNLOAD_REMOVED:
 				break;
 			default:
 				if (globalstat.download_speed > 0 ||
-					d->download_speed > 0)
+					d->download_speed > 0) {
+					json_write_str(jw, "completedLength");
 					json_write_str(jw, "downloadSpeed");
+				}
 
 				if (globalstat.upload_speed > 0 ||
-					d->upload_speed > 0)
-					json_write_str(jw, "uploadLength"),
+					d->upload_speed > 0) {
+					json_write_str(jw, "uploadLength");
 					json_write_str(jw, "uploadSpeed");
+				}
+
 				json_write_str(jw, "connections");
-				json_write_str(jw, "numSeeders");
+				/* json_write_str(jw, "numSeeders"); */
 				break;
 			}
+			d->status = abs(d->status);
 
 			json_write_endarr(jw);
 
@@ -771,14 +1015,158 @@ void periodic(void) {
 	json_write_endarr(jw); /* }}} */
 
 	writer_epilog();
+	return 0;
 }
 
-int stdin_read(void) {
+static int ar_pauseall(int pause) {
+	struct rpc_handler *handler = writer_prolog();
+	if (NULL == handler)
+		return -1;
+
+	handler->func = rpc_on_action;
+	handler->data = NULL;
+	json_write_int(jw, (int)(handler - rpc_handlers));
+
+	json_write_key(jw, "method");
+	json_write_str(jw, pause ? "aria2.pauseAll" : "aria2.unpauseAll");
+
+	json_write_key(jw, "params");
+	json_write_beginarr(jw);
+	/* “secret” */
+	json_write_str(jw, aria_token);
+	json_write_endarr(jw);
+
+	writer_epilog();
+	return 0;
+}
+
+static int ar_download_pause(struct aria_download *d, int pause) {
+	struct rpc_handler *handler = writer_prolog();
+	if (NULL == handler)
+		return -1;
+
+	handler->func = rpc_on_action;
+	json_write_int(jw, (int)(handler - rpc_handlers));
+
+	json_write_key(jw, "method");
+	json_write_str(jw, pause ? "aria2.pause" : "aria2.unpause");
+
+	json_write_key(jw, "params");
+	json_write_beginarr(jw);
+	/* “secret” */
+	json_write_str(jw, aria_token);
+	/* “gid” */
+	json_write_str(jw, d->gid);
+	json_write_endarr(jw);
+
+	writer_epilog();
+
+	return 0;
+}
+
+static int ar_shutdown() {
+	struct rpc_handler *handler = writer_prolog();
+	if (NULL == handler)
+		return -1;
+
+	handler->func = rpc_on_action;
+	json_write_int(jw, (int)(handler - rpc_handlers));
+
+	json_write_key(jw, "method");
+	json_write_str(jw, "aria2.shutdown");
+
+	json_write_key(jw, "params");
+	json_write_beginarr(jw);
+	/* “secret” */
+	json_write_str(jw, aria_token);
+	json_write_endarr(jw);
+
+	writer_epilog();
+
+	return 0;
+}
+
+static int stdin_read(void) {
 	int ch;
 
 	while (ERR != (ch = getch())) {
 		switch (ch) {
+		case 'k':
+		case KEY_UP:
+			if (SIZE_MAX == selidx)
+				selidx = num_downloads - 1;
+			else if (selidx > 0)
+				--selidx;
+			else
+				break;
+
+			ar_cursor_changed();
+			refresh();
+			break;
+
+		case 'P':
+			if (SIZE_MAX == selidx)
+				break;
+
+			(void)ar_pauseall(DOWNLOAD_PAUSED != abs(downloads[selidx].status));
+			break;
+
+		case 'g':
+			if (0 == num_downloads)
+				break;
+
+			selidx = 0;
+			ar_cursor_changed();
+			refresh();
+			break;
+
+		case 'G':
+			if (0 == num_downloads)
+				break;
+
+			selidx = num_downloads - 1;
+			ar_cursor_changed();
+			refresh();
+			break;
+
+		case ' ':
+		case 'p':
+			if (SIZE_MAX == selidx)
+				break;
+
+			(void)ar_download_pause(&downloads[selidx], DOWNLOAD_PAUSED != abs(downloads[selidx].status));
+			break;
+
+		case 'j':
+		case KEY_DOWN:
+			if (SIZE_MAX == selidx && num_downloads > 0)
+				selidx = 0;
+			else if (selidx + 1 < num_downloads)
+				++selidx;
+			else
+				break;
+
+			ar_cursor_changed();
+			refresh();
+			break;
+
+		case 'a':
+			shellout();
+			break;
+
 		case 'q':
+			retcode = EXIT_SUCCESS;
+			return 1;
+
+		/* case 'X':
+			ar_delete_removed();
+			return 1; */
+
+		case KEY_F(9):
+			ar_shutdown();
+			break;
+
+		case ctrl('c'):
 			return 1;
 		}
 
@@ -787,10 +1175,32 @@ int stdin_read(void) {
 	return 0;
 }
 
+static int load_cfg(void) {
+	char *str;
+
+	if (NULL == (ws_host = getenv("ARIA_RPC_HOST")))
+		ws_host = "127.0.0.1";
+
+	str = getenv("ARIA_RPC_PORT");
+	if (NULL == str ||
+		(errno = 0, ws_port = strtoul(str, NULL, 10), errno))
+		ws_port = 6801;
+
+	/* “token:secret” */
+	(str = getenv("ARIA_RPC_SECRET")) || (str = "");
+	aria_token = malloc(snprintf(NULL, 0, "token:%s", str));
+	if (NULL == aria_token) {
+		fprintf(stderr, "%s: Failed to allocate memory.\n",
+				program_name);
+		return -1;
+	}
+
+	(void)sprintf(aria_token, "token:%s", str);
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
-	struct sockaddr_in addr;
-	int r;
 	sigset_t sigmask;
 	struct pollfd fds[
 #ifdef __linux__
@@ -799,6 +1209,16 @@ int main(int argc, char *argv[])
 		2
 #endif
 	];
+
+	(void)argc, (void)argv;
+
+	if (NULL != (program_name = strrchr(argv[0], '/')))
+		++program_name;
+	else
+		program_name = argv[0];
+
+	if (NULL == program_name || '\0' == *program_name)
+		program_name = "aria2t";
 
 	(void)sigemptyset(&sigmask);
 	(void)sigaddset(&sigmask, SIGWINCH);
@@ -809,15 +1229,11 @@ int main(int argc, char *argv[])
 	/* Block signals to being able to receive it via `signalfd()` */
 	(void)sigprocmask(SIG_BLOCK, &sigmask, NULL);
 
-	ws_host = "127.0.0.1";
-	ws_port = 6801;
-	/* “token:secret” */
-	aria_token = getenv("ARIA_SECRET");
+	if (load_cfg())
+		return EXIT_FAILURE;
 
 	if (ws_connect())
 		return EXIT_FAILURE;
-
-	ar_populate();
 
 	/* Needed for ncurses UTF-8. */
 	(void)setlocale(LC_CTYPE, "");
@@ -825,26 +1241,35 @@ int main(int argc, char *argv[])
 	(void)initscr();
 	(void)start_color();
 	(void)use_default_colors();
-	init_pair(1,  34, -1);
-	init_pair(2,  33, -1);
-	init_pair(3,  7,  -1);
-
+	if (NULL == getenv("NO_COLOR")) {
+		/* https://upload.wikimedia.org/wikipedia/commons/1/15/Xterm_256color_chart.svg */
+		init_pair(COLOR_DOWN,  34,  -1);
+		init_pair(COLOR_UP,    33,  -1);
+		init_pair(COLOR_PEER, 133,  -1);
+		init_pair(COLOR_GOOD,  34,  -1);
+		init_pair(COLOR_BAD,  160,  -1);
+		init_pair(COLOR_EOF,  250,  -1);
+	} else {
+		/* https://no-color.org/ */
+		init_pair(COLOR_DOWN,   0,  -1);
+		init_pair(COLOR_UP,     0,  -1);
+		init_pair(COLOR_PEER,   0,  -1);
+		init_pair(COLOR_GOOD,   0,  -1);
+		init_pair(COLOR_BAD,    0,  -1);
+		init_pair(COLOR_EOF,    0,  -1);
+	}
 	/* No input buffering. */
 	(void)raw();
 	/* No input echo. */
 	(void)noecho();
 	/* Do not translate '\n's. */
 	(void)nonl();
-	/* We are async. */
+	/* Make `getch()` non-blocking. */
 	(void)nodelay(stdscr, TRUE);
 	/* Catch special keys. */
 	(void)keypad(stdscr, TRUE);
 	/* 8-bit inputs. */
 	(void)meta(stdscr, TRUE);
-	/* Hide cursor. */
-	(void)curs_set(0);
-	clear();
-	/* mvaddch(6, 5, '0'); */
 
 	/* (void)sigfillset(&sigmask); */
 	fds[0].fd = STDIN_FILENO;
@@ -856,10 +1281,12 @@ int main(int argc, char *argv[])
 	fds[2].events = POLLIN;
 #endif
 
+	ar_populate();
 	periodic();
+	ar_cursor_changed();
 	for (;;) {
-		int const has_activity = globalstat.download_speed + globalstat.upload_speed > 0;
-		int const timeout = has_activity ? 1250 : 2500;
+		int const any_activity = globalstat.download_speed + globalstat.upload_speed > 0;
+		int const timeout = any_activity ? 1250 : 2500;
 
 		switch (poll(fds, array_len(fds), timeout)) {
 		case -1:
@@ -886,9 +1313,11 @@ int main(int argc, char *argv[])
 			while (sizeof ssi == read(fds[2].fd, &ssi, sizeof ssi)) {
 				switch (ssi.ssi_signo) {
 				case SIGWINCH:
-					clear();
 					endwin();
+					/* First refresh is for updating changed window size. */
+					refresh();
 					ar_redraw();
+					refresh();
 					break;
 				case SIGTERM:
 
@@ -912,5 +1341,6 @@ out_of_loop:
 	endwin();
 
 	ws_shutdown();
-	return EXIT_SUCCESS;
+	free(aria_token);
+	return retcode;
 }
