@@ -1284,6 +1284,7 @@ int main(int argc, char *argv[])
 	ar_populate();
 	periodic();
 	ar_cursor_changed();
+	ar_redraw(), refresh();
 	for (;;) {
 		int const any_activity = globalstat.download_speed + globalstat.upload_speed > 0;
 		int const timeout = any_activity ? 1250 : 2500;
