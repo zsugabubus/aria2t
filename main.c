@@ -47,10 +47,8 @@ static char const *program_name;
 
 #define COLOR_DOWN 1
 #define COLOR_UP   2
-#define COLOR_PEER 4
-#define COLOR_GOOD 0
-#define COLOR_BAD  0
-#define COLOR_EOF  7
+#define COLOR_CONN 3
+#define COLOR_EOF  4
 
 void shellout() {
 	char *editor;
@@ -105,7 +103,7 @@ static int ar_redraw_globalstat(void) {
 
 	move(y, 0);
 	/* Downloads number widget. */
-	attr_set(A_NORMAL, COLOR_GOOD, NULL);
+	attr_set(A_NORMAL, 0, NULL);
 	addstr(" 契");
 
 	n = fmt_number(fmtbuf, globalstat.num_active);
@@ -114,23 +112,19 @@ static int ar_redraw_globalstat(void) {
 	if (globalstat.num_waiting > 0) {
 		attr_set(A_NORMAL, 0, NULL);
 		addstr("+");
-		attr_set(A_NORMAL, COLOR_GOOD, NULL);
 
 		n = fmt_number(fmtbuf, globalstat.num_waiting);
 		addnstr(fmtbuf, n);
 	}
-	attr_set(A_NORMAL, 0, NULL);
 
 	addstr(" 栗");
 
-	attr_set(A_NORMAL, COLOR_BAD, NULL);
 	n = fmt_number(fmtbuf, globalstat.num_stopped);
 	addnstr(fmtbuf, n);
 
 	if (globalstat.num_stopped_total > globalstat.num_stopped) {
 		attr_set(A_NORMAL, 0, NULL);
 		addstr("+");
-		attr_set(A_NORMAL, COLOR_BAD, NULL);
 
 		n = fmt_number(fmtbuf, globalstat.num_stopped_total - globalstat.num_stopped);
 		addnstr(fmtbuf, n);
@@ -398,7 +392,7 @@ static void ar_redraw_download(struct aria_download *d, int y) {
 			mvaddnstr(y, x, fmtbuf, n);
 			x += n; */
 
-			attr_set(A_NORMAL, COLOR_PEER, NULL);
+			attr_set(A_NORMAL, COLOR_CONN, NULL);
 			if (d->num_connections > 0) {
 				n = fmt_number(fmtbuf, d->num_connections);
 				mvaddnstr(y, x, fmtbuf, n), x += n;
@@ -1201,6 +1195,32 @@ static int load_cfg(void) {
 	return 0;
 }
 
+static void fill_pairs(void) {
+	switch (NULL == getenv("NO_COLOR") ? COLORS : 0) {
+	/* https://upload.wikimedia.org/wikipedia/commons/1/15/Xterm_256color_chart.svg */
+	default:
+	case 256:
+		init_pair(COLOR_DOWN,  34,  -1);
+		init_pair(COLOR_UP,    33,  -1);
+		init_pair(COLOR_CONN, 133,  -1);
+		init_pair(COLOR_EOF,  250,  -1);
+		break;
+	case 8:
+		init_pair(COLOR_DOWN,   2,  -1);
+		init_pair(COLOR_UP,     4,  -1);
+		init_pair(COLOR_CONN,   5,  -1);
+		init_pair(COLOR_EOF,    6,  -1);
+		break;
+	case 0:
+		/* https://no-color.org/ */
+		init_pair(COLOR_DOWN,   0,  -1);
+		init_pair(COLOR_UP,     0,  -1);
+		init_pair(COLOR_CONN,   0,  -1);
+		init_pair(COLOR_EOF,    0,  -1);
+		break;
+	}
+}
+
 int main(int argc, char *argv[])
 {
 	sigset_t sigmask;
@@ -1243,23 +1263,7 @@ int main(int argc, char *argv[])
 	(void)initscr();
 	(void)start_color();
 	(void)use_default_colors();
-	if (NULL == getenv("NO_COLOR")) {
-		/* https://upload.wikimedia.org/wikipedia/commons/1/15/Xterm_256color_chart.svg */
-		init_pair(COLOR_DOWN,  34,  -1);
-		init_pair(COLOR_UP,    33,  -1);
-		init_pair(COLOR_PEER, 133,  -1);
-		init_pair(COLOR_GOOD,  34,  -1);
-		init_pair(COLOR_BAD,  160,  -1);
-		init_pair(COLOR_EOF,  250,  -1);
-	} else {
-		/* https://no-color.org/ */
-		init_pair(COLOR_DOWN,   0,  -1);
-		init_pair(COLOR_UP,     0,  -1);
-		init_pair(COLOR_PEER,   0,  -1);
-		init_pair(COLOR_GOOD,   0,  -1);
-		init_pair(COLOR_BAD,    0,  -1);
-		init_pair(COLOR_EOF,    0,  -1);
-	}
+	fill_pairs();
 	/* No input buffering. */
 	(void)raw();
 	/* No input echo. */
