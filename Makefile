@@ -25,7 +25,7 @@ run: $(TARGET)
 	./$^
 
 .PHONY: install
-install:
+install: $(TARGET)
 	$(INSTALL) -Ds $(TARGET) $(DESTDIR)$(PREFIX)
 	$(INSTALL) -D $(TARGET).1 $(DESTDIR)$(MANPREFIX)/man1/
 
