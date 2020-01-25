@@ -629,6 +629,8 @@ static int rpc_on_populate(struct json_node *result, void *data) {
 	} while (NULL != (result = json_next(result)));
 
 	ar_downloads_changed();
+	refresh();
+
 	return 0;
 }
 
@@ -1282,9 +1284,12 @@ int main(int argc, char *argv[])
 #endif
 
 	ar_populate();
-	periodic();
+
+	/* Do an early redraw. */
 	ar_cursor_changed();
-	ar_redraw(), refresh();
+	ar_redraw();
+	refresh();
+
 	for (;;) {
 		int const any_activity = globalstat.download_speed + globalstat.upload_speed > 0;
 		int const timeout = any_activity ? 1250 : 2500;
