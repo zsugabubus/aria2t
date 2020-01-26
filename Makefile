@@ -2,7 +2,7 @@
 PREFIX ?= /usr/local
 MANPREFIX ?= /usr/share/man
 INSTALL ?= install
-GZIP ?= gzip
+GZIP ?= gzip --best --force
 PKGCONFIG ?= pkg-config
 
 TARGET := aria2t
@@ -27,11 +27,12 @@ run: $(TARGET)
 .PHONY: install
 install: $(TARGET)
 	$(INSTALL) -Ds $(TARGET) $(DESTDIR)$(PREFIX)/bin
-	$(INSTALL) -D $(TARGET).1 $(DESTDIR)$(MANPREFIX)/man1
+	$(INSTALL) -Dm644 $(TARGET).1 $(DESTDIR)$(MANPREFIX)/man1/$(TARGET).1
+	$(GZIP) $(DESTDIR)$(MANPREFIX)/man1/$(TARGET).1
 
 .PHONY: uninstall
 uninstall:
-	rm -f $(DESTDIR)$(PREFIX)/$(TARGET) $(DESTDIR)$(MANPREFIX)/man1/$(TARGET).1
+	rm -f $(DESTDIR)$(PREFIX)/$(TARGET) $(DESTDIR)$(MANPREFIX)/man1/$(TARGET).1.gz
 
 .PHONY: clean
 clean:
