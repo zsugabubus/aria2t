@@ -228,13 +228,13 @@ static struct aria_download *find_download_bygid(char *gid) {
 	return NULL;
 }
 
-static void ar_redraw(void);
+static void ar_redraw_downloads(void);
 
 static void ar_scroll_changed(void) {
-	ar_redraw();
+	ar_redraw_downloads();
 }
 
-static void ar_cursor_changed(void) {
+static void ar_redraw_cursor(void) {
 	int show = num_downloads > 0 && selidx != SIZE_MAX;
 	int h = getmaxy(stdscr);
 	size_t oldfirstidx = firstidx;
@@ -259,6 +259,12 @@ static void ar_cursor_changed(void) {
 	}
 }
 
+static void ar_redraw_all(void) {
+	ar_redraw_downloads();
+	ar_redraw_cursor();
+	ar_redraw_globalstat();
+}
+
 static void ar_downloads_changed(void) {
 	char selgid[sizeof ((struct aria_download *)0)->gid];
 
@@ -275,7 +281,7 @@ static void ar_downloads_changed(void) {
 		selidx = d - downloads;
 	}
 
-	ar_redraw();
+	ar_redraw_downloads();
 }
 
 
@@ -444,7 +450,7 @@ static void ar_redraw_download(struct aria_download *d, int y) {
 	clrtoeol();
 }
 
-static void ar_redraw(void) {
+static void ar_redraw_downloads(void) {
 	int line = 0, height = getmaxy(stdscr) - 1/*status line*/;
 
 	for (;line < height; ++line) {
@@ -460,7 +466,7 @@ static void ar_redraw(void) {
 
 	ar_redraw_globalstat();
 
-	ar_cursor_changed();
+	ar_redraw_cursor();
 }
 
 static struct aria_download *download_alloc(void) {
@@ -651,18 +657,13 @@ static void rpc_parse_globalstat(struct json_node *node) {
 		else
 			assert(!"unknown key in global stat");
 	} while (NULL != (node = json_next(node)));
+
+	ar_redraw_globalstat();
 }
 
-int rpc_on_periodic(struct json_node *result, void *data) {
-	int any_changed = 0;
+static void rpc_parse_downloadlist(struct json_node *result) {
+	int changed = 0;
 
-	(void)data;
-
-	/* Result is an array. Go to the first element. */
-	result = json_children(result);
-	rpc_parse_globalstat(result);
-
-	result = json_next(result);
 	/* No more repsonses if no downloads. */
 	for (;NULL != result; result = json_next(result)) {
 		struct json_node *node;
@@ -683,14 +684,25 @@ int rpc_on_periodic(struct json_node *result, void *data) {
 			d = download_alloc();
 		if (NULL != d) {
 			rpc_parse_download(d, node);
-			any_changed = 1;
+			changed = 1;
 		}
 	}
 
-	if (any_changed) {
+	if (changed)
 		ar_downloads_changed();
-		refresh();
-	}
+}
+
+int rpc_on_periodic(struct json_node *result, void *data) {
+	(void)data;
+
+	/* Result is an array. Go to the first element. */
+	result = json_children(result);
+	rpc_parse_globalstat(result);
+
+	result = json_next(result);
+	rpc_parse_downloadlist(result);
+
+	refresh();
 
 	return 0;
 }
@@ -1097,7 +1109,7 @@ static int stdin_read(void) {
 			else
 				break;
 
-			ar_cursor_changed();
+			ar_redraw_cursor();
 			refresh();
 			break;
 
@@ -1113,7 +1125,7 @@ static int stdin_read(void) {
 				break;
 
 			selidx = 0;
-			ar_cursor_changed();
+			ar_redraw_cursor();
 			refresh();
 			break;
 
@@ -1122,7 +1134,7 @@ static int stdin_read(void) {
 				break;
 
 			selidx = num_downloads - 1;
-			ar_cursor_changed();
+			ar_redraw_cursor();
 			refresh();
 			break;
 
@@ -1143,7 +1155,7 @@ static int stdin_read(void) {
 			else
 				break;
 
-			ar_cursor_changed();
+			ar_redraw_cursor();
 			refresh();
 			break;
 
@@ -1289,10 +1301,9 @@ int main(int argc, char *argv[])
 #endif
 
 	ar_populate();
+	periodic();
 
-	/* Do an early redraw. */
-	ar_cursor_changed();
-	ar_redraw();
+	ar_redraw_all();
 	refresh();
 
 	for (;;) {
@@ -1327,7 +1338,7 @@ int main(int argc, char *argv[])
 					endwin();
 					/* First refresh is for updating changed window size. */
 					refresh();
-					ar_redraw();
+					ar_redraw_all();
 					refresh();
 					break;
 				case SIGTERM:
