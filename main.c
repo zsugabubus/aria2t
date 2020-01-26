@@ -960,8 +960,9 @@ static int periodic(void) {
 				json_write_str(jw, "seeder");
 				json_write_str(jw, "bittorrent");
 			} else if (NONAME == d->name) {
-				/* “bittorrent.info.name” was empty. Assign the
-				 * name of the first file as name. */
+				/* If “bittorrent.info.name” is empty then
+				 * assign the name of the first file as name.
+				 * */
 				json_write_str(jw, "files");
 			}
 
@@ -1180,7 +1181,7 @@ static int load_cfg(void) {
 	str = getenv("ARIA_RPC_PORT");
 	if (NULL == str ||
 		(errno = 0, ws_port = strtoul(str, NULL, 10), errno))
-		ws_port = 6801;
+		ws_port = 6800;
 
 	/* “token:secret” */
 	(str = getenv("ARIA_RPC_SECRET")) || (str = "");
