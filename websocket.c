@@ -15,6 +15,7 @@
 #include <netdb.h>
 #include <sys/uio.h>
 
+#include "aria2t.h"
 #include "websocket.h"
 #include "jeezson/jeezson.h"
 
@@ -39,6 +40,13 @@ in_port_t ws_port;
 static int ws_http_wait_upgrade(void);
 static int ws_http_upgrade(void);
 
+static void ws_strerror(char const *msg) {
+	fprintf(stderr, "%s: websocket: %s: %s\n",
+			program_name,
+			msg,
+			strerror(errno));
+}
+
 int ws_connect(void)
 {
 	struct addrinfo hints;
@@ -55,7 +63,8 @@ int ws_connect(void)
 	sprintf(ws_port_str, "%hu", ws_port);
 
 	if ((err = getaddrinfo(ws_host, ws_port_str, &hints, &addrs))) {
-		fprintf(stderr, "could'n resolve %s:%s: %s\n",
+		fprintf(stderr, "%s: couldn't resolve %s:%s: %s\n",
+				program_name,
 				ws_host, ws_port_str,
 				gai_strerror(err));
 		return 1;
@@ -75,8 +84,7 @@ int ws_connect(void)
 		{
 			int flags = fcntl(ws_fd, F_GETFD);
 			flags |= O_CLOEXEC;
-			if (fcntl(ws_fd, F_SETFD, flags))
-				fprintf(stderr, "fcntl: %s\n", strerror(errno));
+			(void)fcntl(ws_fd, F_SETFD, flags);
 		}
 #endif
 
@@ -91,14 +99,19 @@ int ws_connect(void)
 	freeaddrinfo(addrs);
 
 	if (NULL == p) {
-		fprintf(stderr, "couldn't to connect to %s:%s\n",
+		fprintf(stderr, "%s: couldn't connect to %s:%s\n",
+				program_name,
 				ws_host, ws_port_str);
 		return 1;
 	}
 
-	ws_http_upgrade();
+	if (ws_http_upgrade()) {
+		fprintf(stderr, "%s: websocket: connection refused\n",
+				program_name);
+		return 1;
+	}
 
-	return p == NULL;
+	return 0;
 }
 
 int ws_write(char const *msg, size_t msglen)
@@ -136,7 +149,7 @@ int ws_write(char const *msg, size_t msglen)
 	while (-1 == writev(ws_fd, iov, array_len(iov))) {
 		if (EINTR == errno)
 			continue;
-		fprintf(stderr, "write: %s\n", strerror(errno));
+		ws_strerror("write");
 		return -1;
 	}
 
@@ -147,7 +160,7 @@ int writeall(void const *buf, size_t nbyte) {
 	while (-1 == write(ws_fd, buf, nbyte)) {
 		if (EINTR == errno)
 			continue;
-		fprintf(stderr, "write: %s\n", strerror(errno));
+		ws_strerror("write");
 		return -1;
 	}
 
@@ -190,7 +203,7 @@ static int ws_http_wait_upgrade(void) {
 		while (-1 == (len = read(ws_fd, buf, sizeof buf))) {
 			if (EINTR == errno)
 				continue;
-			fprintf(stderr, "write: %s\n", strerror(errno));
+			ws_strerror("read");
 			return -1;
 		}
 		if (0 == len)
@@ -336,15 +349,15 @@ static int ws_process_chunk(char *buf, size_t len) {
 			msglen += need, p += need, remain -= need;
 
 			if (!need_more) {
-				int result;
+				int err;
 				/* printf("msg !!! %*s \n", (int)msglen, msgbuf); */
 
 				switch (hdrbuf[0] & 0x7f) {
 				case 0x1:
-					result = on_ws_message(msgbuf, msglen);
+					err = on_ws_message(msgbuf, msglen);
 					break;
 				case 0xa:
-					result = ws_shutdown();
+					err = ws_shutdown();
 					break;
 				default:
 					/* printf("type=%x\n", hdrbuf[0]); */
@@ -353,8 +366,8 @@ static int ws_process_chunk(char *buf, size_t len) {
 				msgsize = 0;
 				msglen = 0;
 				hdrlen = 0;
-				if (result)
-					return result;
+				if (err)
+					return err;
 			}
 		}
 	} while (remain > 0);
@@ -364,10 +377,10 @@ static int ws_process_chunk(char *buf, size_t len) {
 
 int ws_read(void)
 {
-	int result = 0;
+	int err = 0;
 
 	if (fcntl(ws_fd, F_SETFL, ws_fd_sflags | O_NONBLOCK)) {
-		fprintf(stderr, "fcntl: %s\n", strerror(errno));
+		ws_strerror("fcntl");
 		return -1;
 	}
 
@@ -377,25 +390,25 @@ int ws_read(void)
 
 		if (-1 == (len = read(ws_fd, buf, sizeof buf))) {
 			if (EAGAIN != errno) {
-				result = -1;
-				fprintf(stderr, "read: %s\n", strerror(errno));
+				err = -1;
+				ws_strerror("read");
 			}
 			break;
 		}
 		if (len == 0) {
-			result = -1;
+			err = -1;
 			break;
 		}
 
-		if ((result = ws_process_chunk(buf, (size_t)len)))
+		if ((err = ws_process_chunk(buf, (size_t)len)))
 			break;
 	}
 
 	if (fcntl(ws_fd, F_SETFL, ws_fd_sflags)) {
-		fprintf(stderr, "fcntl: %s\n", strerror(errno));
-		result = -1;
+		ws_strerror("fcntl");
+		err = -1;
 	}
 
-	return result;
+	return err;
 }
 /* vi:set noet: */

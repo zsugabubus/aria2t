@@ -43,7 +43,7 @@ static size_t num_downloads;
 static size_t selidx = SIZE_MAX;
 static size_t firstidx = 0;
 
-static char const *program_name;
+char const *program_name;
 
 #define COLOR_DOWN 1
 #define COLOR_UP   2
