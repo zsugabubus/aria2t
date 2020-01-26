@@ -18,7 +18,7 @@ $(TARGET): main.c format.c websocket.c jeezson/jeezson.c jeezson/jeezson.h Makef
 
 .PHONY: bootstrap
 bootstrap:
-	git submodule update --init
+	git submodule update --init --recursive
 
 .PHONY: run
 run: $(TARGET)
