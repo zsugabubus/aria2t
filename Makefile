@@ -5,7 +5,7 @@ INSTALL ?= install
 GZIP ?= gzip --best --force
 PKGCONFIG ?= pkg-config
 
-TARGET := aria2t
+TARGETS := aria2-watch aria2-fuse
 CFLAGS += -std=c89 -g -O2 -pedantic -Wall -Wextra -Werror
 
 PACKAGES := ncursesw
@@ -13,26 +13,27 @@ PACKAGES := ncursesw
 LDLIBS += $(shell $(PKGCONFIG) --libs $(PACKAGES))
 LDFLAGS += $(shell $(PKGCONFIG) --cflags $(PACKAGES))
 
-$(TARGET): main.c format.? websocket.? base64.? jeezson/jeezson.? Makefile
-	$(CC) -o $@ $(CFLAGS) $(LDLIBS) $(LDFLAGS) main.c format.c websocket.c base64.c jeezson/jeezson.c
+.PHONY: all
+all: $(TARGETS)
+
+$(TARGETS): %: %.c program.h format.? websocket.? base64.? jeezson/jeezson.? Makefile
+	$(CC) -o $@ $(CFLAGS) $(LDLIBS) $(LDFLAGS) $@.c format.c websocket.c base64.c jeezson/jeezson.c
 
 .PHONY: bootstrap
 bootstrap:
 	git submodule update --init --recursive
 
-.PHONY: run
-run: $(TARGET)
-	./$^
+.PHONY: install install-%
+install: $(patsubst aria2-%,install-%,$(TARGETS))
 
-.PHONY: install
-install: $(TARGET)
-	$(INSTALL) -Ds $(TARGET) $(DESTDIR)$(PREFIX)/bin
-	$(INSTALL) -Dm644 $(TARGET).1 $(DESTDIR)$(MANPREFIX)/man1/$(TARGET).1
-	$(GZIP) $(DESTDIR)$(MANPREFIX)/man1/$(TARGET).1
+install-%: aria2-%
+	$(INSTALL) -Ds -t $(DESTDIR)$(PREFIX)/bin $<
+	$(INSTALL) -Dm644 -t $(DESTDIR)$(MANPREFIX)/man1 $<.1
+	$(GZIP) $(DESTDIR)$(MANPREFIX)/man1/$<.1
 
 .PHONY: uninstall
 uninstall:
-	rm -f $(DESTDIR)$(PREFIX)/$(TARGET) $(DESTDIR)$(MANPREFIX)/man1/$(TARGET).1.gz
+	rm -f $(patsubst %,$(DESTDIR)$(PREFIX)/%,$(TARGETS)) $(patsubst %,$(DESTDIR)$(MANPREFIX)/man1/%.1.gz,$(TARGETS))
 
 .PHONY: clean
 clean:

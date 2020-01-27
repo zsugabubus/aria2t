@@ -15,7 +15,7 @@
 #include <netdb.h>
 #include <sys/uio.h>
 
-#include "aria2t.h"
+#include "program.h"
 #include "websocket.h"
 #include "jeezson/jeezson.h"
 

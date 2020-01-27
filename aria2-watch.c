@@ -1466,7 +1466,7 @@ int main(int argc, char *argv[])
 		program_name = argv[0];
 
 	if (NULL == program_name || '\0' == *program_name)
-		program_name = "aria2t";
+		program_name = "aria2-watch";
 
 	(void)sigemptyset(&sigmask);
 	(void)sigaddset(&sigmask, SIGWINCH);

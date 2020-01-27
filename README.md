@@ -1,6 +1,8 @@
-# aria2t
+# aria2-tools
 
-`Aria2c(1)` frontend for terminal guys. See `aria2t(1)`.
+`aria2-watch(1)`: Minimal TUI for `aria2c(1)`.
+
+`aria2-fuse(1)`: Soon...
 
 ## Installation
 
@@ -13,8 +15,8 @@ ncursesw
 ### Build from Source
 
 ```sh
-git clone https://github.com/zsugabubus/aria2t &&
-cd aria2t &&
+git clone https://github.com/zsugabubus/aria2-tools &&
+cd aria2-tools &&
 make bootstrap &&
 make
 make install
@@ -22,10 +24,10 @@ make install
 
 ## Running
 
-See `aria2t(1)` for details. (Or `man ./aria2t.1` if you didn't run install yet.)
+See `aria2-watch(1)` for details.
 
 ```sh
-env ARIA_RPC_SECRET=mysecret ARIA_RPC_PORT=12345 aria2t
+env ARIA_RPC_SECRET=mysecret ARIA_RPC_PORT=12345 aria2-watch
 ```
 
 ## License
