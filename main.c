@@ -1,23 +1,28 @@
 #define _XOPEN_SOURCE_EXTENDED
-#include <stdlib.h>
-#include <stdio.h>
 #include <assert.h>
-#include <string.h>
-#include <poll.h>
-#include <unistd.h>
-#include <signal.h>
+#include <ctype.h>
 #include <errno.h>
-#ifdef __linux__
-#include <sys/signalfd.h>
-#include <sys/prctl.h>
-#endif
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
+#include <unistd.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#include <sys/signalfd.h>
+#endif
 
 #include <locale.h>
 #include <ncurses.h>
 #include "websocket.h"
 #include "aria.h"
 #include "format.h"
+#include "base64.h"
 #include "jeezson/jeezson.h"
 
 #define ctrl(x) ((x) & 0x1f)
@@ -50,49 +55,7 @@ char const *program_name;
 #define COLOR_CONN 3
 #define COLOR_EOF  4
 
-void shellout() {
-	char *editor;
-	pid_t pid;
-	char filepath[256];
-	char *tmp = getenv("TMP");
-	int file;
-#ifdef __linux__
-	int ppid = getpid();
-#endif
-
-	def_prog_mode();
-	endwin();
-
-	if (NULL == (editor = getenv("EDITOR")))
-		assert(0);
-
-	snprintf(filepath, sizeof filepath, "/%s/%s.XXXXXX",
-			NULL != tmp ? tmp : "tmp",
-			program_name);
-	if (-1 == (file = mkstemp(filepath)))
-		assert(0);
-
-	if (0 == (pid = fork())) {
-#ifdef __linux__
-		(void)prctl(PR_SET_PDEATHSIG, SIGKILL);
-		/* Has been reparented since. */
-		if (getppid() != ppid)
-			raise(SIGKILL);
-#endif
-
-		execlp(editor, editor, filepath, NULL);
-		_exit(127);
-	}
-
-	while (-1 == waitpid(pid, NULL, 0) && errno == EINTR)
-		;
-
-	unlink(filepath);
-
-	refresh();
-}
-
-static int ar_redraw_globalstat(void) {
+static int redraw_globalstat(void) {
 	int y, x, w;
 	char fmtbuf[5];
 	int n;
@@ -228,13 +191,13 @@ static struct aria_download *find_download_bygid(char *gid) {
 	return NULL;
 }
 
-static void ar_redraw_downloads(void);
+static void redraw_downloads(void);
 
 static void ar_scroll_changed(void) {
-	ar_redraw_downloads();
+	redraw_downloads();
 }
 
-static void ar_redraw_cursor(void) {
+static void redraw_cursor(void) {
 	int show = num_downloads > 0 && selidx != SIZE_MAX;
 	int h = getmaxy(stdscr);
 	size_t oldfirstidx = firstidx;
@@ -259,10 +222,10 @@ static void ar_redraw_cursor(void) {
 	}
 }
 
-static void ar_redraw_all(void) {
-	ar_redraw_downloads();
-	ar_redraw_cursor();
-	ar_redraw_globalstat();
+static void redraw_all(void) {
+	redraw_downloads();
+	redraw_cursor();
+	redraw_globalstat();
 }
 
 static void ar_downloads_changed(void) {
@@ -281,11 +244,11 @@ static void ar_downloads_changed(void) {
 		selidx = d - downloads;
 	}
 
-	ar_redraw_downloads();
+	redraw_downloads();
 }
 
 
-static void ar_redraw_download(struct aria_download *d, int y) {
+static void redraw_download(struct aria_download *d, int y) {
 	int x;
 	char fmtbuf[5];
 	int n;
@@ -450,12 +413,12 @@ static void ar_redraw_download(struct aria_download *d, int y) {
 	clrtoeol();
 }
 
-static void ar_redraw_downloads(void) {
+static void redraw_downloads(void) {
 	int line = 0, height = getmaxy(stdscr) - 1/*status line*/;
 
 	for (;line < height; ++line) {
 		if (firstidx + line < num_downloads) {
-			ar_redraw_download(&downloads[firstidx + line], line);
+			redraw_download(&downloads[firstidx + line], line);
 		} else {
 			attr_set(A_NORMAL, COLOR_EOF, NULL);
 			mvaddstr(line, 0, "~");
@@ -464,9 +427,9 @@ static void ar_redraw_downloads(void) {
 		}
 	}
 
-	ar_redraw_globalstat();
+	redraw_globalstat();
 
-	ar_redraw_cursor();
+	redraw_cursor();
 }
 
 static struct aria_download *download_alloc(void) {
@@ -594,6 +557,13 @@ static int rpc_on_error(struct json_node *error) {
 	return 0;
 }
 
+static int rpc_on_adddownloads(struct json_node *result, void *data) {
+	(void)result;
+	if (NULL != data)
+		unlink(data);
+	return 0;
+}
+
 static int rpc_on_action(struct json_node *result, void *data) {
 	(void)result, (void)data;
 	return 0;
@@ -658,7 +628,7 @@ static void rpc_parse_globalstat(struct json_node *node) {
 			assert(!"unknown key in global stat");
 	} while (NULL != (node = json_next(node)));
 
-	ar_redraw_globalstat();
+	redraw_globalstat();
 }
 
 static void rpc_parse_downloadlist(struct json_node *result) {
@@ -816,10 +786,240 @@ static void writer_epilog() {
 	json_write_endobj(jw);
 
 	ws_write(jw->buf, jw->len);
-	json_writer_term(jw);
 
 	jw->buf = NULL;
 	json_writer_free(jw);
+}
+
+static char *stripwhite(char *str, size_t *n) {
+	while (isspace(str[*n - 1]))
+		--*n;
+	str[*n] = '\0';
+
+	while (isspace(str[0]))
+		++str, --*n;
+
+	return str;
+}
+
+static char *file_b64_enc(char *pathname) {
+	int fd = open(pathname, O_RDONLY);
+	char *buf;
+	char *b64;
+	size_t b64len;
+	struct stat st;
+
+	if (-1 == fd)
+		return NULL;
+
+	if (-1 == fstat(fd, &st))
+		return NULL;
+
+	buf = mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+	if (MAP_FAILED == buf)
+		return NULL;
+
+	b64 = b64_enc(buf, st.st_size, &b64len);
+	if (NULL != b64)
+		b64[b64len] = '\0';
+
+	(void)munmap(buf, st.st_size);
+
+	return b64;
+}
+
+static int fileout(char *filepath, size_t n) {
+	char *editor;
+	pid_t pid;
+	char *tmp = getenv("TMP");
+	int fd;
+	int wst;
+#ifdef __linux__
+	int ppid = getpid();
+#endif
+
+	def_prog_mode();
+	endwin();
+
+	if (NULL == (editor = getenv("EDITOR")))
+		assert(0);
+
+	snprintf(filepath, n, "/%s/%s.XXXXXX",
+			NULL != tmp ? tmp : "tmp",
+			program_name);
+	if (-1 == (fd = mkstemp(filepath)))
+		assert(0);
+
+	if (0 == (pid = fork())) {
+#ifdef __linux__
+		(void)prctl(PR_SET_PDEATHSIG, SIGKILL);
+		/* Has been reparented since. */
+		if (getppid() != ppid)
+			raise(SIGKILL);
+#endif
+
+		execlp(editor, editor, filepath, NULL);
+		_exit(127);
+	}
+
+	while (-1 == waitpid(pid, &wst, 0) && errno == EINTR)
+		;
+
+	refresh();
+
+	if (!WIFEXITED(wst) || EXIT_SUCCESS != WEXITSTATUS(wst)) {
+		(void)unlink(filepath);
+		fd = -1;
+	}
+
+	return fd;
+}
+
+static void ar_download_add() {
+	struct rpc_handler *handler;
+	FILE *file;
+	int fd;
+	char *line;
+	size_t linesize;
+	ssize_t err;
+	size_t linelen;
+	char filepath[256];
+
+	handler = writer_prolog();
+	if (NULL == handler)
+		return;
+
+	if (-1 == (fd = fileout(filepath, sizeof filepath)))
+		return;
+
+	handler->func = rpc_on_adddownloads;
+	handler->data = strdup(filepath);
+	json_write_int(jw, (int)(handler - rpc_handlers));
+
+	json_write_key(jw, "method");
+	json_write_str(jw, "system.multicall");
+
+	json_write_key(jw, "params");
+	json_write_beginarr(jw);
+	/* 1st arg: “methods” */
+	json_write_beginarr(jw); /* {{{ */
+
+	file = fdopen(fd, "r");
+	line = NULL, linesize = 0;
+	while (-1 != (err = getline(&line, &linesize, file))) {
+		char *uri;
+		enum { TORRENT, METALINK, URI } type;
+
+		linelen = (size_t)err;
+		uri = stripwhite(line, &linelen);
+
+#define ISSUFFIX(lit) \
+	((size_t)linelen >= sizeof lit && \
+		 0 == memcmp(uri + (size_t)linelen - ((sizeof lit) - 1), lit, (sizeof lit) - 1))
+
+		if (0 == linelen)
+			continue;
+
+		if (ISSUFFIX(".torrent"))
+			type = TORRENT;
+		else if (ISSUFFIX(".meta4") || ISSUFFIX(".metalink"))
+			type = METALINK;
+		else
+			type = URI;
+#undef ISSUFFIX
+
+		json_write_beginobj(jw);
+
+		json_write_key(jw, "methodName");
+		switch (type) {
+		case TORRENT:
+			json_write_str(jw, "aria2.addTorrent");
+			break;
+		case METALINK:
+			json_write_str(jw, "aria2.addMetalink");
+			break;
+		case URI:
+			json_write_str(jw, "aria2.addUri");
+			break;
+		}
+
+		json_write_key(jw, "params");
+		json_write_beginarr(jw);
+		/* “secret” */
+		json_write_str(jw, aria_token);
+		/* “data” */
+		switch (type) {
+		case TORRENT:
+		case METALINK: {
+			char *str = file_b64_enc(uri);
+			if (NULL == str)
+				break;
+
+			json_write_str(jw, str);
+			free(str);
+			break;
+		}
+		case URI:
+			json_write_beginarr(jw);
+			json_write_str(jw, uri);
+			json_write_endarr(jw);
+			break;
+		}
+		if (TORRENT == type) {
+			/* “uris” */
+			json_write_beginarr(jw);
+			json_write_endarr(jw);
+		}
+		/* “options” */
+		json_write_beginobj(jw);
+		{
+			char buf[256];
+			char *cwd;
+			json_write_key(jw, "dir");
+			if (NULL == (cwd = getcwd(buf, sizeof buf)))
+				assert(0);
+
+			json_write_str(jw, cwd);
+		}
+		json_write_endobj(jw);
+
+		json_write_endarr(jw);
+
+		json_write_endobj(jw);
+	}
+	free(line);
+
+	json_write_endarr(jw); /* }}} */
+	json_write_endarr(jw);
+
+	writer_epilog();
+}
+
+static void ar_download_remove(int force) {
+	struct rpc_handler *handler = writer_prolog();
+	struct aria_download *d;
+	if (NULL == handler)
+		return;
+
+	if (SIZE_MAX == selidx)
+		return;
+	d = &downloads[selidx];
+
+	handler->func = rpc_on_action;
+	json_write_int(jw, (int)(handler - rpc_handlers));
+
+	json_write_key(jw, "method");
+	json_write_str(jw, force ? "aria2.forceRemove" : "aria2.remove" );
+
+	json_write_key(jw, "params");
+	json_write_beginarr(jw);
+	/* “secret” */
+	json_write_str(jw, aria_token);
+	/* “gid” */
+	json_write_str(jw, d->gid);
+	json_write_endarr(jw);
+
+	writer_epilog();
 }
 
 static int ar_populate(void) {
@@ -972,10 +1172,14 @@ static int periodic(void) {
 				json_write_str(jw, "seeder");
 				json_write_str(jw, "bittorrent");
 			} else if (NONAME == d->name) {
-				/* If “bittorrent.info.name” is empty then
-				 * assign the name of the first file as name.
-				 * */
-				json_write_str(jw, "files");
+				if (NULL == d->files) {
+					/* If “bittorrent.info.name” is empty then
+					 * assign the name of the first file as name.
+					 * */
+					json_write_str(jw, "files");
+				} else {
+					assert(0);
+				}
 			}
 
 			if (d->status < 0 && d->total_size == 0) {
@@ -1109,7 +1313,7 @@ static int stdin_read(void) {
 			else
 				break;
 
-			ar_redraw_cursor();
+			redraw_cursor();
 			refresh();
 			break;
 
@@ -1125,7 +1329,7 @@ static int stdin_read(void) {
 				break;
 
 			selidx = 0;
-			ar_redraw_cursor();
+			redraw_cursor();
 			refresh();
 			break;
 
@@ -1134,7 +1338,7 @@ static int stdin_read(void) {
 				break;
 
 			selidx = num_downloads - 1;
-			ar_redraw_cursor();
+			redraw_cursor();
 			refresh();
 			break;
 
@@ -1155,12 +1359,21 @@ static int stdin_read(void) {
 			else
 				break;
 
-			ar_redraw_cursor();
+			redraw_cursor();
 			refresh();
 			break;
 
 		case 'a':
-			shellout();
+			ar_download_add();
+			break;
+
+		case 'D':
+		case KEY_DC: /* Delete */
+			ar_download_remove(0);
+			break;
+
+		case ctrl('D'):
+			ar_download_remove(1);
 			break;
 
 		case 'q':
@@ -1303,7 +1516,7 @@ int main(int argc, char *argv[])
 	ar_populate();
 	periodic();
 
-	ar_redraw_all();
+	redraw_all();
 	refresh();
 
 	for (;;) {
@@ -1338,7 +1551,7 @@ int main(int argc, char *argv[])
 					endwin();
 					/* First refresh is for updating changed window size. */
 					refresh();
-					ar_redraw_all();
+					redraw_all();
 					refresh();
 					break;
 				case SIGTERM:

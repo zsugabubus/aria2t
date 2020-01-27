@@ -13,8 +13,8 @@ PACKAGES := ncursesw
 LDLIBS += $(shell $(PKGCONFIG) --libs $(PACKAGES))
 LDFLAGS += $(shell $(PKGCONFIG) --cflags $(PACKAGES))
 
-$(TARGET): main.c format.c websocket.c jeezson/jeezson.c jeezson/jeezson.h Makefile
-	$(CC) -o $@ $(CFLAGS) $(LDLIBS) $(LDFLAGS) main.c format.c websocket.c jeezson/jeezson.c
+$(TARGET): main.c format.? websocket.? base64.? jeezson/jeezson.? Makefile
+	$(CC) -o $@ $(CFLAGS) $(LDLIBS) $(LDFLAGS) main.c format.c websocket.c base64.c jeezson/jeezson.c
 
 .PHONY: bootstrap
 bootstrap:
