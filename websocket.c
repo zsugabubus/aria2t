@@ -17,10 +17,9 @@
 
 #include "program.h"
 #include "websocket.h"
-#include "jeezson/jeezson.h"
 
 int ws_fd;
-int ws_fd_sflags;
+static int ws_fd_sflags;
 
 #define HTTP_SWITCHING_PROTOCOLS "HTTP/1.1 101 "
 
@@ -31,14 +30,11 @@ static size_t msgsize = 0;
 static size_t msgallocsize = 0;
 static size_t msglen = 0;
 
-char const* ws_host;
-in_port_t ws_port;
-
 #define container_of(ptr, type, member) (type *)((char *)ptr - offsetof(type, member))
 #define array_len(arr) (sizeof(arr) / sizeof *(arr))
 
 static int ws_http_wait_upgrade(void);
-static int ws_http_upgrade(void);
+static int ws_http_upgrade(char const *host, in_port_t port);
 
 static void ws_strerror(char const *msg) {
 	fprintf(stderr, "%s: websocket: %s: %s\n",
@@ -47,12 +43,12 @@ static void ws_strerror(char const *msg) {
 			strerror(errno));
 }
 
-int ws_connect(void)
+int ws_connect(char const *host, in_port_t port)
 {
 	struct addrinfo hints;
 	struct addrinfo *addrs, *p;
 	int err;
-	char ws_port_str[sizeof "65536"];
+	char port_str[sizeof "65536"];
 
 	memset(&hints, 0, sizeof hints);
 	hints.ai_family = AF_UNSPEC;
@@ -60,12 +56,12 @@ int ws_connect(void)
 	hints.ai_protocol = IPPROTO_TCP;
 	hints.ai_flags = 0;
 
-	sprintf(ws_port_str, "%hu", ws_port);
+	sprintf(port_str, "%hu", port);
 
-	if ((err = getaddrinfo(ws_host, ws_port_str, &hints, &addrs))) {
+	if ((err = getaddrinfo(host, port_str, &hints, &addrs))) {
 		fprintf(stderr, "%s: couldn't resolve %s:%s: %s\n",
 				program_name,
-				ws_host, ws_port_str,
+				host, port_str,
 				gai_strerror(err));
 		return 1;
 	}
@@ -101,11 +97,11 @@ int ws_connect(void)
 	if (NULL == p) {
 		fprintf(stderr, "%s: couldn't connect to %s:%s\n",
 				program_name,
-				ws_host, ws_port_str);
+				host, port_str);
 		return 1;
 	}
 
-	if (ws_http_upgrade()) {
+	if (ws_http_upgrade(host, port)) {
 		fprintf(stderr, "%s: websocket: connection refused\n",
 				program_name);
 		return 1;
@@ -167,7 +163,7 @@ int writeall(void const *buf, size_t nbyte) {
 	return 0;
 }
 
-static int ws_http_upgrade(void)
+static int ws_http_upgrade(char const *host, in_port_t port)
 {
 	char buf[147 + 256];
 	size_t len;
@@ -180,7 +176,7 @@ static int ws_http_upgrade(void)
 "Sec-WebSocket-Key:AQIDBAUGBwgJCgsMDQ4PEC==\r\n"
 "Sec-WebSocket-Version:13\r\n"
 "\r\n",
-		ws_host, ws_port);
+		host, port);
 
 	if (writeall(buf, len))
 		return 1;
