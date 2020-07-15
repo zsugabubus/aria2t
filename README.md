@@ -1,34 +1,29 @@
-# aria2-tools
+# aria2t
 
-`aria2-watch(1)`: Minimal TUI for `aria2c(1)`.
-
-`aria2-fuse(1)`: Soon...
+Minimalistic TUI for `aria2c(1)` with Vim-like keybindings.
 
 ## Installation
 
-### Requirements
-
 ```
-ncursesw
-```
-
-### Build from Source
-
-```sh
 git clone https://github.com/zsugabubus/aria2-tools &&
 cd aria2-tools &&
 make bootstrap &&
-make
+make &&
 make install
 ```
 
-## Running
+## Usage
 
-See `aria2-watch(1)` for details.
-
-```sh
-env ARIA_RPC_SECRET=mysecret ARIA_RPC_PORT=12345 aria2-watch
 ```
+env ARIA_RPC_SECRET=mysecret ARIA_RPC_PORT=12345 aria2t
+```
+
+For available commands refer to `aria2t(1)`.
+
+
+### Requirements
+
+* `ncursesw`
 
 ## License
 

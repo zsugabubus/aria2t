@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <string.h>
 
+char *last_error;
 char const *program_name;
 
 void set_program_name(char *argv0) {

@@ -50,7 +50,7 @@ static int
 fmt_decimal(char *str, uint64_t n, char const *UNITS, uint64_t const *BASE) {
 	int i = 0;
 
-	while (n >= BASE[++i])
+	while (n >= 1000 * BASE[i++])
 		;
 
 	n *= BASE[2];

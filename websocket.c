@@ -18,7 +18,7 @@
 #include "program.h"
 #include "websocket.h"
 
-int ws_fd;
+int ws_fd = -1;
 static int ws_fd_sflags;
 
 #define HTTP_SWITCHING_PROTOCOLS "HTTP/1.1 101 "
@@ -36,14 +36,14 @@ static size_t msglen = 0;
 static int ws_http_wait_upgrade(void);
 static int ws_http_upgrade(char const *host, in_port_t port);
 
-static void ws_strerror(char const *msg) {
-	fprintf(stderr, "%s: websocket: %s: %s\n",
-			program_name,
-			msg,
-			strerror(errno));
+static void
+ws_strerror(void)
+{
+	free(last_error), last_error = strdup(strerror(errno));
 }
 
-int ws_connect(char const *host, in_port_t port)
+int
+ws_connect(char const *host, in_port_t port)
 {
 	struct addrinfo hints;
 	struct addrinfo *addrs, *p;
@@ -59,13 +59,11 @@ int ws_connect(char const *host, in_port_t port)
 	sprintf(port_str, "%hu", port);
 
 	if ((err = getaddrinfo(host, port_str, &hints, &addrs))) {
-		fprintf(stderr, "%s: couldn't resolve %s:%s: %s\n",
-				program_name,
-				host, port_str,
-				gai_strerror(err));
+		free(last_error), last_error = strdup("failed to resolve");
 		return 1;
 	}
 
+	ws_fd = -1;
 	for (p = addrs; NULL != p; p = p->ai_next) {
 		ws_fd = socket(p->ai_family,
 				p->ai_socktype
@@ -94,16 +92,13 @@ int ws_connect(char const *host, in_port_t port)
 
 	freeaddrinfo(addrs);
 
-	if (NULL == p) {
-		fprintf(stderr, "%s: couldn't connect to %s:%s\n",
-				program_name,
-				host, port_str);
+	if (ws_fd == -1) {
+		free(last_error), last_error = strdup("failed to connect");
 		return 1;
 	}
 
 	if (ws_http_upgrade(host, port)) {
-		fprintf(stderr, "%s: websocket: connection refused\n",
-				program_name);
+		free(last_error), last_error = strdup("connection refused");
 		return 1;
 	}
 
@@ -145,7 +140,7 @@ int ws_write(char const *msg, size_t msglen)
 	while (-1 == writev(ws_fd, iov, array_len(iov))) {
 		if (EINTR == errno)
 			continue;
-		ws_strerror("write");
+		ws_fd = -1;
 		return -1;
 	}
 
@@ -156,7 +151,7 @@ int writeall(void const *buf, size_t nbyte) {
 	while (-1 == write(ws_fd, buf, nbyte)) {
 		if (EINTR == errno)
 			continue;
-		ws_strerror("write");
+		ws_fd = -1;
 		return -1;
 	}
 
@@ -199,7 +194,8 @@ static int ws_http_wait_upgrade(void) {
 		while (-1 == (len = read(ws_fd, buf, sizeof buf))) {
 			if (EINTR == errno)
 				continue;
-			ws_strerror("read");
+			ws_strerror();
+			ws_fd = -1;
 			return -1;
 		}
 		if (0 == len)
@@ -240,7 +236,9 @@ static int ws_http_wait_upgrade(void) {
 	}
 }
 
-int ws_shutdown(void) {
+int
+ws_shutdown(void)
+{
 	int ret;
 
 	if ((ret = writeall("\x80\x8a", 2)))
@@ -321,11 +319,14 @@ static int ws_process_chunk(char *buf, size_t len) {
 				assert(msgsize == msglen);
 				msgsize = msglen + payloadlen;
 				if (msgsize > msgallocsize) {
-					msgbuf = realloc(msgbuf, (msgallocsize = msgsize));
-					if (NULL == msgbuf) {
+					void *p;
+					p = realloc(msgbuf, msgsize);
+					if (NULL == p) {
 						ws_shutdown();
-						break;
+						return -1;
 					}
+					msgbuf = p;
+					msgallocsize = msgsize;
 				}
 
 				hdrlen = sizeof hdrbuf;
@@ -352,9 +353,11 @@ static int ws_process_chunk(char *buf, size_t len) {
 				case 0x1:
 					err = on_ws_message(msgbuf, msglen);
 					break;
-				case 0xa:
+
+				case 0x8:
 					err = ws_shutdown();
 					break;
+
 				default:
 					/* printf("type=%x\n", hdrbuf[0]); */
 					assert(0);
@@ -376,7 +379,7 @@ int ws_read(void)
 	int err = 0;
 
 	if (fcntl(ws_fd, F_SETFL, ws_fd_sflags | O_NONBLOCK)) {
-		ws_strerror("fcntl");
+		ws_strerror();
 		return -1;
 	}
 
@@ -386,12 +389,16 @@ int ws_read(void)
 
 		if (-1 == (len = read(ws_fd, buf, sizeof buf))) {
 			if (EAGAIN != errno) {
+				(void)ws_shutdown();
+				ws_fd = -1;
+
 				err = -1;
-				ws_strerror("read");
+				ws_strerror();
 			}
 			break;
 		}
 		if (len == 0) {
+			ws_fd = -1;
 			err = -1;
 			break;
 		}
@@ -401,7 +408,7 @@ int ws_read(void)
 	}
 
 	if (fcntl(ws_fd, F_SETFL, ws_fd_sflags)) {
-		ws_strerror("fcntl");
+		ws_strerror();
 		err = -1;
 	}
 

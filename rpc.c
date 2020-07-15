@@ -4,16 +4,16 @@
 #include <errno.h>
 
 #include "program.h"
-#include "aria2-rpc.h"
+#include "rpc.h"
 #include "websocket.h"
 #include "jeezson/jeezson.h"
-#include "base64.h"
+#include "b64.h"
 
 static struct json_node *nodes;
 static size_t nnodes;
 
 struct aria_globalstat globalstat;
-struct aria_download *downloads;
+struct aria_download **downloads;
 size_t num_downloads;
 
 char *rpc_secret;
@@ -23,13 +23,15 @@ in_port_t rpc_port;
 struct json_writer jw[1];
 
 struct rpc_handler rpc_handlers[10];
-#define array_len(a) (sizeof(a) / sizeof(*a))
+#define ARRAY_LEN(a) (sizeof(a) / sizeof(*a))
 
-static int on_rpc_notification(char const *method, struct json_node *event);
+static void
+on_rpc_notification(char const *method, struct json_node *event);
 
-static int on_rpc_action(struct json_node *result, void *data) {
+static void
+on_rpc_action(struct json_node *result, void *data)
+{
 	(void)result, (void)data;
-	return 0;
 }
 
 int rpc_load_cfg(void) {
@@ -56,80 +58,75 @@ int rpc_load_cfg(void) {
 	return 0;
 }
 
-int rpc_connect(void) {
-	return  ws_connect(rpc_host, rpc_port);
+int
+rpc_connect(void)
+{
+	return ws_connect(rpc_host, rpc_port);
 }
 
-int rpc_shutdown(void) {
-	ws_shutdown();
-	free(rpc_secret);
-	return 0;
+int
+rpc_shutdown(void)
+{
+	return ws_shutdown();
 }
 
 struct aria_download *rpc_download_alloc(void) {
-	void *p = realloc(downloads, (num_downloads + 1) * sizeof *downloads);
+	void **p;
+	struct aria_download *d;
 
+	p = realloc(downloads, (num_downloads + 1) * sizeof *downloads);
 	if (NULL == p)
 		return NULL;
 
-	return memset(&(downloads = p)[num_downloads++], 0, sizeof *downloads);
+	if (NULL == (d = calloc(1, sizeof *d)))
+		return NULL;
+
+	(downloads = p)[num_downloads++] = d;
+
+	return d;
 }
 
-static struct rpc_handler *rpc_handler_alloc(void) {
-	size_t n = array_len(rpc_handlers);
+static struct rpc_handler *
+rpc_handler_alloc(void)
+{
+	size_t n = ARRAY_LEN(rpc_handlers);
 
-	while (n > 0)
-		if (NULL == rpc_handlers[--n].func)
+	while (n > 0) {
+		if (NULL == rpc_handlers[--n].proc) {
+			rpc_handlers[n].proc = on_rpc_action;
 			return &rpc_handlers[n];
+		}
+	}
 
 	return NULL;
 }
 
-static void handler_free(struct rpc_handler *handler) {
-	handler->func = NULL;
-	free(handler->data);
+struct aria_download **
+get_download_bygid(char const*gid)
+{
+	struct aria_download *d, **dd = downloads;
+	struct aria_download **const end = &downloads[num_downloads];
+
+	for (;dd < end; ++dd)
+		if (0 == memcmp((*dd)->gid, gid, sizeof (*dd)->gid))
+			return dd;
+
+	if (NULL == (d = rpc_download_alloc()))
+		return NULL;
+
+	memcpy(d->gid, gid, sizeof d->gid);
+
+	dd = &downloads[num_downloads - 1];
+	assert(*dd == d);
+
+	return dd;
 }
 
-struct aria_download *find_download_bygid(char const*gid) {
-	struct aria_download *d = downloads;
-	struct aria_download *const end = &downloads[num_downloads];
-
-	for (;d < end; ++d)
-		if (0 == memcmp(d->gid, gid, sizeof d->gid))
-			return d;
-	return NULL;
-}
-
-/* static char *file_b64_enc(char *pathname) {
-	int fd = open(pathname, O_RDONLY);
-	char *buf;
-	char *b64;
-	size_t b64len;
-	struct stat st;
-
-	if (-1 == fd)
-		return NULL;
-
-	if (-1 == fstat(fd, &st))
-		return NULL;
-
-	buf = mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
-	if (MAP_FAILED == buf)
-		return NULL;
-
-	b64 = b64_enc(buf, st.st_size, &b64len);
-	if (NULL != b64)
-		b64[b64len] = '\0';
-
-	(void)munmap(buf, st.st_size);
-
-	return b64;
-} */
-
-int on_ws_message(char *msg, size_t msglen) {
+int
+on_ws_message(char *msg, size_t msglen)
+{
 	struct json_node *id;
 	struct json_node *method;
-	int r;
 
 	(void)msglen;
 
@@ -139,19 +136,21 @@ int on_ws_message(char *msg, size_t msglen) {
 		struct json_node *const result = json_get(nodes, "result");
 		struct rpc_handler *const handler = &rpc_handlers[(unsigned)id->val.num];
 
-		if (NULL != result)
-			r = handler->func(result, handler->data);
-		else
-			r = rpc_on_error(json_get(nodes, "error"), handler->data);
+		assert(NULL != handler->proc);
 
-		handler_free(handler);
-		if (r)
-			return r;
+		free(last_error);
+		last_error = NULL;
+
+		if (NULL != result)
+			handler->proc(result, handler->data);
+		else
+			rpc_on_error(json_get(nodes, "error"));
+
+		handler->proc = NULL;
 	} else if (NULL != (method = json_get(nodes, "method"))) {
 		struct json_node *const params = json_get(nodes, "params");
 
-		if ((r = on_rpc_notification(method->val.str, params + 1)))
-			return r;
+		on_rpc_notification(method->val.str, params + 1);
 	} else {
 		assert(0);
 	}
@@ -162,7 +161,6 @@ int on_ws_message(char *msg, size_t msglen) {
 }
 
 struct rpc_handler *rpc_writer_prolog() {
-	json_writer_init(jw);
 	json_write_beginobj(jw);
 
 	json_write_key(jw, "jsonrpc");
@@ -172,45 +170,93 @@ struct rpc_handler *rpc_writer_prolog() {
 	return rpc_handler_alloc();
 }
 
-void rpc_writer_epilog() {
+void
+rpc_writer_epilog(struct rpc_handler *handler)
+{
 	json_write_endobj(jw);
 
-	ws_write(jw->buf, jw->len);
+	if (ws_write(jw->buf, jw->len)) {
+		assert(0);
+		handler->proc = NULL;
+	}
 
-	jw->buf = NULL;
-	json_writer_free(jw);
+	json_writer_empty(jw);
 }
 
 void rpc_parse_download_files(struct aria_download *d, struct json_node *node) {
-	free(d->files);
+	void *p;
 
-	d->files = malloc((d->num_files = json_len(node)) * sizeof *(d->files));
-	if (NULL == d->files)
+	if (d->files) {
+		size_t i;
+		for (i = 0; i < d->num_files; ++i)
+			free(d->files[i].path);
+	}
+
+	d->num_files = json_len(node);
+	d->num_selfiles = 0;
+	if (NULL == (p = realloc(d->files, d->num_files * sizeof *(d->files)))) {
+		d->num_files = 0;
+		free(d->files), d->files = NULL;
 		return;
+	} else {
+		d->files = p;
+	}
 
 	node = json_children(node);
 	do {
 		struct json_node *field = json_children(node);
 		struct aria_file file;
-		size_t index = index;
+		int index = -1;
+
+		file.num_uris = 0;
+		file.uris = NULL;
 
 		do {
 			if (0 == strcmp(field->key, "index"))
-				index = (size_t)field->val.num;
+				index = atoi(field->val.str) - 1;
 			else if (0 == strcmp(field->key, "path"))
 				file.path = strlen(field->val.str) > 0 ? strdup(field->val.str) : NULL;
 			else if (0 == strcmp(field->key, "length"))
 				file.total_size = strtoull(field->val.str, NULL, 10);
 			else if (0 == strcmp(field->key, "completedLength"))
 				file.have = strtoull(field->val.str, NULL, 10);
-			else if (0 == strcmp(field->key, "selected"))
-				file.selected = json_true == json_type(field);
-			else if (0 == strcmp(field->key, "uris"))
-				;
+			else if (0 == strcmp(field->key, "selected")) {
+				file.selected = 0 == strcmp(field->val.str, "true");
+				d->num_selfiles += file.selected;
+			} else if (0 == strcmp(field->key, "uris")) {
+				struct json_node *uris;
+				uint32_t uriidx = 0;
+
+				if (json_isempty(field))
+					continue;
+
+				uris = json_children(field);
+				file.num_uris = json_len(field);
+				file.uris = malloc(file.num_uris * sizeof *(file.uris));
+
+				do {
+					struct json_node *field = json_children(uris);
+					struct aria_uri uri;
+
+					do {
+						if (0 == strcmp(field->key, "status")) {
+							if (0 == strcmp(field->val.str, "used"))
+								uri.status = aria_uri_status_used;
+							else if (0 == strcmp(field->val.str, "waiting"))
+								uri.status = aria_uri_status_waiting;
+							else
+								uri.status = aria_uri_status_unknown;
+						} else if (0 == strcmp(field->key, "uri"))
+							uri.uri = strdup(field->val.str);
+					} while (NULL != (field = json_next(field)));
+					file.uris[uriidx++] = uri;
+				} while (NULL != (uris = json_next(uris)));
+			}
 			else
 				assert(!"unknown key in file");
 		} while (NULL != (field = json_next(field)));
 
+		assert(index >= 0);
 		d->files[index] = file;
 	} while (NULL != (node = json_next(node)));
 }
@@ -224,7 +270,7 @@ void rpc_parse_download(struct aria_download *d, struct json_node *node) {
 			memcpy(d->gid, field->val.str, sizeof d->gid);
 		} else if (0 == strcmp(field->key, "files")) {
 			rpc_parse_download_files(d, field);
-			if (NULL == d->files)
+			if (NULL == d->files || d->num_files == 0)
 				continue;
 
 			if (NULL == d->name) {
@@ -235,6 +281,13 @@ void rpc_parse_download(struct aria_download *d, struct json_node *node) {
 				}
 			}
 
+			if (NULL == d->name && d->files[0].num_uris > 0) {
+				char *uri = d->files[0].uris[0].uri;
+				if (NULL != uri) {
+					d->name = strdup(uri);
+				}
+
+			}
 		} else if (0 == strcmp(field->key, "bittorrent")) {
 			struct json_node *bt_info, *bt_name;
 
@@ -269,12 +322,49 @@ d->local = strto##type(field->val.str, NULL, 10);
 		/* else_if_FIELD(num_seeders, "numSeeders", ul) */
 		else_if_FIELD(num_connections, "connections", ul)
 #undef else_if_FIELD
+		else if (0 == strcmp(field->key, "following")) {
+			struct aria_download **dd = get_download_bygid(field->val.str);
+			d->following = NULL != dd ? *dd : NULL;
+		} else if (0 == strcmp(field->key, "belongsTo")) {
+			assert(!"eeeeeeeee");
+			struct aria_download **dd = get_download_bygid(field->val.str);
+			d->belongs_to = NULL != dd ? *dd : NULL;
+		}
 	} while (NULL != (field = json_next(field)));
 
 	assert(strlen(d->gid) == 16);
 }
 
-void rpc_parse_globalstat(struct json_node *node) {
+char *
+rpc_parse_session_info(struct json_node *node)
+{
+	/* First kv-pair.  */
+	node = json_children(node);
+	do {
+		if (0 == strcmp(node->key, "sessionId"))
+			return node->val.str;
+	} while (NULL != (node = json_next(node)));
+
+	return NULL;
+}
+
+void
+rpc_parse_options(struct json_node *node, void(*cb)(char const *, char const *, void *), void *arg)
+{
+	if (json_isempty(node))
+		return;
+
+	/* First kv-pair.  */
+	node = json_children(node);
+	do {
+		assert("option value must be string" && json_str == json_type(node));
+		cb(node->key, node->val.str, arg);
+	} while (NULL != (node = json_next(node)));
+}
+
+void
+rpc_parse_globalstat(struct json_node *node)
+{
 	if (json_arr != json_type(node))
 		return;
 
@@ -294,8 +384,11 @@ void rpc_parse_globalstat(struct json_node *node) {
 		PARSE_FIELD(num_stopped, "numStopped", ul)
 		PARSE_FIELD(num_stopped_total, "numStoppedTotal", ul)
 #undef PARSE_FIELD
-		else
-			assert(!"unknown key in global stat");
+		else {
+		printf(">>>%s %s<<<\n", node->key, node->val.str);
+			/* assert(!"unknown key in global stat"); */
+
+		}
 	} while (NULL != (node = json_next(node)));
 }
 
@@ -303,35 +396,78 @@ void rpc_parse_downloads(struct json_node *result) {
 	/* No more repsonses if no downloads. */
 	for (;NULL != result; result = json_next(result)) {
 		struct json_node *node;
+		struct aria_download **dd;
 		struct aria_download *d;
 
 		if (json_obj == json_type(result)) {
-			assert(0);
-			/* REMOVE torrent, error */
+			/* FIXME: REMOVE torrent, error + handle other cases too when gid not arrived */
 			continue;
 		}
 
 		node = json_children(result);
 
-		d = find_download_bygid(json_get(node, "gid")->val.str);
+		if (NULL != (dd = get_download_bygid(json_get(node, "gid")->val.str))) {
+			d = *dd;
 
-		if (NULL == d)
-			d = rpc_download_alloc();
-		if (NULL != d)
+			/* these fields are not included in response if not
+			 * applicable, so we do a self reference loop to
+			 * indicate that we do not need to request these next
+			 * time */
+			if (NULL == d->belongs_to)
+				d->belongs_to = d;
+			if (NULL == d->following)
+				d->following = d;
+
 			rpc_parse_download(d, node);
+		}
 	}
 }
 
-void aria_download_remove(struct aria_download *d, int force) {
+void
+aria_download_repos(struct aria_download *d, int32_t pos, enum pos_how how)
+{
+	static char const *const POS_HOW[] = {
+		"POS_SET",
+		"POS_CUR",
+		"POS_END"
+	};
+
 	struct rpc_handler *handler = rpc_writer_prolog();
 	if (NULL == handler)
 		return;
 
-	handler->func = on_rpc_action;
 	json_write_int(jw, (int)(handler - rpc_handlers));
 
 	json_write_key(jw, "method");
-	json_write_str(jw, force ? "aria2.forceRemove" : "aria2.remove" );
+	json_write_str(jw, "aria2.changePosition");
+
+	json_write_key(jw, "params");
+	json_write_beginarr(jw);
+	/* “secret” */
+	json_write_str(jw, rpc_secret);
+	/* “gid” */
+	json_write_str(jw, d->gid);
+	/* “pos” */
+	json_write_int(jw, pos);
+	/* “how” */
+	json_write_str(jw, POS_HOW[how]);
+	json_write_endarr(jw);
+
+	rpc_writer_epilog(handler);
+
+}
+
+void
+aria_download_remove(struct aria_download *d, int force)
+{
+	struct rpc_handler *handler = rpc_writer_prolog();
+	if (NULL == handler)
+		return;
+
+	json_write_int(jw, (int)(handler - rpc_handlers));
+
+	json_write_key(jw, "method");
+	json_write_str(jw, force ? "aria2.forceRemove" : "aria2.remove");
 
 	json_write_key(jw, "params");
 	json_write_beginarr(jw);
@@ -341,15 +477,16 @@ void aria_download_remove(struct aria_download *d, int force) {
 	json_write_str(jw, d->gid);
 	json_write_endarr(jw);
 
-	rpc_writer_epilog();
+	rpc_writer_epilog(handler);
 }
 
-int aria_shutdown(int force) {
+void
+aria_shutdown(int force)
+{
 	struct rpc_handler *handler = rpc_writer_prolog();
 	if (NULL == handler)
-		return -1;
+		return;
 
-	handler->func = on_rpc_action;
 	json_write_int(jw, (int)(handler - rpc_handlers));
 
 	json_write_key(jw, "method");
@@ -361,22 +498,20 @@ int aria_shutdown(int force) {
 	json_write_str(jw, rpc_secret);
 	json_write_endarr(jw);
 
-	rpc_writer_epilog();
-
-	return 0;
+	rpc_writer_epilog(handler);
 }
 
-int aria_pause_all(int pause) {
+void
+aria_pause_all(int pause, int force)
+{
 	struct rpc_handler *handler = rpc_writer_prolog();
 	if (NULL == handler)
-		return -1;
+		return;
 
-	handler->func = on_rpc_action;
-	handler->data = NULL;
 	json_write_int(jw, (int)(handler - rpc_handlers));
 
 	json_write_key(jw, "method");
-	json_write_str(jw, pause ? "aria2.pauseAll" : "aria2.unpauseAll");
+	json_write_str(jw, pause ? (force ? "aria2.forcePauseAll" : "aria2.pauseAll") : "aria2.unpauseAll");
 
 	json_write_key(jw, "params");
 	json_write_beginarr(jw);
@@ -384,20 +519,20 @@ int aria_pause_all(int pause) {
 	json_write_str(jw, rpc_secret);
 	json_write_endarr(jw);
 
-	rpc_writer_epilog();
-	return 0;
+	rpc_writer_epilog(handler);
 }
 
-int aria_download_pause(struct aria_download *d, int pause) {
+void
+aria_download_pause(struct aria_download *d, int pause, int force)
+{
 	struct rpc_handler *handler = rpc_writer_prolog();
 	if (NULL == handler)
-		return -1;
+		return;
 
-	handler->func = on_rpc_action;
 	json_write_int(jw, (int)(handler - rpc_handlers));
 
 	json_write_key(jw, "method");
-	json_write_str(jw, pause ? "aria2.pause" : "aria2.unpause");
+	json_write_str(jw, pause ? (force ? "aria2.forcePause" : "aria2.pause") : "aria2.unpause");
 
 	json_write_key(jw, "params");
 	json_write_beginarr(jw);
@@ -407,23 +542,45 @@ int aria_download_pause(struct aria_download *d, int pause) {
 	json_write_str(jw, d->gid);
 	json_write_endarr(jw);
 
-	rpc_writer_epilog();
-
-	return 0;
+	rpc_writer_epilog(handler);
 }
 
-static int on_rpc_notification(char const *method, struct json_node *event) {
+void
+aria_remove_result(struct aria_download *d)
+{
+	struct rpc_handler *handler = rpc_writer_prolog();
+	if (NULL == handler)
+		return;
+
+	json_write_int(jw, (int)(handler - rpc_handlers));
+
+	json_write_key(jw, "method");
+	json_write_str(jw, NULL != d ? "aria2.removeDownloadResult" : "aria2.purgeDownloadResult");
+
+	json_write_key(jw, "params");
+	json_write_beginarr(jw);
+	/* “secret” */
+	json_write_str(jw, rpc_secret);
+	if (NULL != d) {
+		/* “gid” */
+		json_write_str(jw, d->gid);
+	}
+	json_write_endarr(jw);
+
+	rpc_writer_epilog(handler);
+}
+
+static void
+on_rpc_notification(char const *method, struct json_node *event)
+{
 	char *const gid = json_get(event, "gid")->val.str;
-	struct aria_download *d = find_download_bygid(gid);
+	struct aria_download **dd = get_download_bygid(gid);
+	struct aria_download *d;
 	int newstatus;
 
-	if (NULL == d) {
-		d = rpc_download_alloc();
-		if (NULL == d)
-			return 0; /* TODO: Error messag. */
-
-		memcpy(d->gid, gid, sizeof d->gid);
-	}
+	if (NULL == dd)
+		return;
+	d = *dd;
 
 	if (0 == strcmp(method, "aria2.onDownloadStart")) {
 		newstatus = DOWNLOAD_ACTIVE;
@@ -444,15 +601,12 @@ static int on_rpc_notification(char const *method, struct json_node *event) {
 		newstatus = DOWNLOAD_COMPLETE;
 
 	} else {
-		assert(0);
-		return 1;
+		return;
 	}
 
 	if (newstatus != d->status) {
 		d->status = -newstatus;
 		rpc_on_download_status_change(d, d->status);
 	}
-
-	return 0;
 }
 
