@@ -102,8 +102,8 @@ draw_file(struct aria_download const *d, size_t i, int *y)
 	uint32_t j;
 
 	szhave[fmt_space(szhave, f->have)] = '\0';
-	sztotal[fmt_space(sztotal, f->total_size)] = '\0';
-	szpercent[fmt_percent(szpercent, f->have, f->total_size)] = '\0';
+	sztotal[fmt_space(sztotal, f->total)] = '\0';
+	szpercent[fmt_percent(szpercent, f->have, f->total)] = '\0';
 
 	attr_set(A_BOLD, 0, NULL);
 	mvprintw((*y)++, 0, "  %5d: ", i + 1);
@@ -230,20 +230,20 @@ downloadcmp(struct aria_download const **pthis, struct aria_download const **pot
 	}
 
 	/* prefer incomplete downloads */
-	cmp = (other->have != other->total_size) -
-		(this->have != this->total_size);
+	cmp = (other->have != other->total) -
+		(this->have != this->total);
 	if (cmp)
 		return cmp;
 
 	if (DOWNLOAD_ACTIVE == this_status) {
 		/* prefer downloads that almost completed */
-		/* NOTE: total_size can be null for example in cases if there is no
+		/* NOTE: total can be null for example in cases if there is no
 		 * information about the download. */
-		x = this->total_size > 0
-			? this->have * 10000 / this->total_size
+		x = this->total > 0
+			? this->have * 10000 / this->total
 			: 0;
-		y = other->total_size > 0
-			? other->have * 10000 / other->total_size
+		y = other->total > 0
+			? other->have * 10000 / other->total
 			: 0;
 		if (x != y)
 			return x > y ? -1 : 1;
@@ -254,11 +254,11 @@ downloadcmp(struct aria_download const **pthis, struct aria_download const **pot
 	}
 
 	/* prefer better upload ratio */
-	x = this->total_size > 0
-		? this->uploaded * 10000 / this->total_size
+	x = this->total > 0
+		? this->uploaded * 10000 / this->total
 		: 0;
-	y = other->total_size > 0
-		? other->uploaded * 10000 / other->total_size
+	y = other->total > 0
+		? other->uploaded * 10000 / other->total
 		: 0;
 	if (x != y)
 		return x > y ? -1 : 1;
@@ -317,7 +317,7 @@ draw_download(struct aria_download const *d, int y, struct aria_download const *
 
 		attr_set(A_NORMAL, 0, NULL);
 
-		n = fmt_space(fmtbuf, d->total_size);
+		n = fmt_space(fmtbuf, d->total);
 		mvaddnstr(y, x, fmtbuf, n), x += n;
 		mvaddstr(y, x, " "), x += 1;
 
@@ -334,12 +334,12 @@ draw_download(struct aria_download const *d, int y, struct aria_download const *
 		x += 2;
 		attr_set(A_NORMAL, 0, NULL);
 
-		n = fmt_space(fmtbuf, d->total_size);
+		n = fmt_space(fmtbuf, d->total);
 		mvaddnstr(y, x, fmtbuf, n), x += n;
 
 		mvaddstr(y, x, "["), x += 1;
 
-		n = fmt_percent(fmtbuf, d->have, d->total_size);
+		n = fmt_percent(fmtbuf, d->have, d->total);
 		mvaddnstr(y, x, fmtbuf, n), x += n;
 
 		mvaddstr(y, x, "] ("), x += 3;
@@ -395,7 +395,7 @@ draw_download(struct aria_download const *d, int y, struct aria_download const *
 		if (d->download_speed > 0) {
 			attr_set(A_BOLD, COLOR_DOWN, NULL);
 
-			n = fmt_percent(fmtbuf, d->have, d->total_size);
+			n = fmt_percent(fmtbuf, d->have, d->total);
 			mvaddnstr(y, x, fmtbuf, n), x += n;
 
 			attr_set(A_NORMAL, 0, NULL);
@@ -411,14 +411,14 @@ draw_download(struct aria_download const *d, int y, struct aria_download const *
 			/* mvaddstr(y, x, "/"); */
 			attr_set(A_NORMAL, -1, NULL);
 		} else {
-			n = fmt_space(fmtbuf, d->total_size);
+			n = fmt_space(fmtbuf, d->total);
 			mvaddnstr(y, x, fmtbuf, n), x += n;
 
 			mvaddstr(y, x, "["), x += 1;
 
-			attr_set(d->have == d->total_size ? A_NORMAL : A_BOLD, COLOR_DOWN, NULL);
+			attr_set(d->have == d->total ? A_NORMAL : A_BOLD, COLOR_DOWN, NULL);
 
-			n = fmt_percent(fmtbuf, d->have, d->total_size);
+			n = fmt_percent(fmtbuf, d->have, d->total);
 			mvaddnstr(y, x, fmtbuf, n), x += n;
 
 			attr_set(A_NORMAL, 0, NULL);
@@ -461,7 +461,7 @@ draw_download(struct aria_download const *d, int y, struct aria_download const *
 
 				attr_set(A_NORMAL, COLOR_UP, NULL);
 
-				n = fmt_percent(fmtbuf, d->uploaded, d->total_size);
+				n = fmt_percent(fmtbuf, d->uploaded, d->total);
 				mvaddnstr(y, x, fmtbuf, n), x += n;
 
 				attr_set(A_NORMAL, 0, NULL);
@@ -609,23 +609,49 @@ draw_statusline(void)
 
 	clrtoeol();
 
-	/* print bandwidth info on the right */
+	/* build bottom-right widgets from right-to-left */
 	x = w;
 	mvaddstr(y, x -= 1, " ");
 
-	/* Upload speed widget. */
+	/* upload */
+
+	if (globalstat.upload_speed_limit > 0) {
+		n = fmt_speed(fmtbuf, globalstat.upload_speed_limit);
+		mvaddnstr(y, x -= n, fmtbuf, n);
+		mvaddstr(y, x -= 1, "/");
+	}
+
 	if (globalstat.upload_speed > 0)
 		attr_set(A_BOLD, COLOR_UP, NULL);
 	n = fmt_speed(fmtbuf, globalstat.upload_speed);
 	mvaddnstr(y, x -= n, fmtbuf, n);
 
+	mvaddstr(y, x -= 4, "] @ ");
+	n = fmt_percent(fmtbuf, globalstat.upload_total, globalstat.have_total);
+	mvaddnstr(y, x -= n, fmtbuf, n);
+	mvaddstr(y, x -= 1, "[");
+
+	n = fmt_speed(fmtbuf, globalstat.upload_total);
+	mvaddnstr(y, x -= n, fmtbuf, n);
+
 	mvaddstr(y, x -= 3, "  ");
 	attr_set(A_NORMAL, 0, NULL);
 
-	/* Download speed widget. */
+	/* download */
+	if (globalstat.download_speed_limit > 0) {
+		n = fmt_speed(fmtbuf, globalstat.download_speed_limit);
+		mvaddnstr(y, x -= n, fmtbuf, n);
+		mvaddstr(y, x -= 1, "/");
+	}
+
 	if (globalstat.download_speed > 0)
 		attr_set(A_BOLD, COLOR_DOWN, NULL);
 	n = fmt_speed(fmtbuf, globalstat.download_speed);
+	mvaddnstr(y, x -= n, fmtbuf, n);
+
+	mvaddstr(y, x -= 3, " @ ");
+
+	n = fmt_speed(fmtbuf, globalstat.have_total);
 	mvaddnstr(y, x -= n, fmtbuf, n);
 
 	mvaddstr(y, x -= 3, "  ");
@@ -699,6 +725,25 @@ on_update_all(struct json_node *result, void *data)
 }
 
 static void
+compute_global(void)
+{
+	struct aria_download *d, **dd = downloads;
+	struct aria_download **const end = &downloads[num_downloads];
+
+	globalstat.have_total = 0;
+	globalstat.upload_total = 0;
+
+	for (; dd < end; ++dd) {
+		struct aria_download const *const d = *dd;
+		globalstat.have_total += d->have;
+		globalstat.upload_total += d->uploaded;
+	}
+
+	/* reset counter */
+	globalstat.compute_total = 0;
+}
+
+static void
 on_periodic(struct json_node *result, void *data)
 {
 	(void)data;
@@ -706,6 +751,22 @@ on_periodic(struct json_node *result, void *data)
 	/* Result is an array. Go to the first element. */
 	result = json_children(result);
 	rpc_parse_globalstat(result);
+
+	/* there is some activity so we need to recount soon */
+	if (globalstat.upload_speed > 0 || globalstat.download_speed > 0)
+		compute_global();
+
+	if (globalstat.compute_total > 0)
+		compute_global();
+
+#if 0
+		++globalstat.compute_total;
+	/* activity stopped but there was some before. let's update. */
+	else if (globalstat.compute_total > 0)
+		compute_global();
+
+#endif
+
 	draw_statusline();
 
 	result = json_next(result);
@@ -1359,6 +1420,9 @@ ar_update_delta(int all)
 			/* “keys” */
 			json_write_beginarr(jw);
 
+			if (d->status < 0)
+				globalstat.compute_total = 1;
+
 			if (DOWNLOAD_REMOVED == abs(d->status))
 				continue;
 
@@ -1382,7 +1446,7 @@ ar_update_delta(int all)
 				json_write_str(jw, "files");
 			}
 
-			if (d->status < 0 && d->total_size == 0) {
+			if (d->status < 0 && d->total == 0) {
 				json_write_str(jw, "totalLength");
 				json_write_str(jw, "completedLength");
 				json_write_str(jw, "uploadLength");
@@ -1710,7 +1774,7 @@ int main(int argc, char *argv[])
 	/* (void)sigfillset(&sigmask); */
 	/* Block signals to being able to receive it via `signalfd()` */
 	sigprocmask(SIG_BLOCK, &sigmask, NULL);
-	
+
 	signal(SIGPIPE, SIG_IGN);
 
 	if (rpc_load_cfg())

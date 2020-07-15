@@ -107,7 +107,7 @@ get_download_bygid(char const*gid)
 	struct aria_download *d, **dd = downloads;
 	struct aria_download **const end = &downloads[num_downloads];
 
-	for (;dd < end; ++dd)
+	for (; dd < end; ++dd)
 		if (0 == memcmp((*dd)->gid, gid, sizeof (*dd)->gid))
 			return dd;
 
@@ -217,7 +217,7 @@ void rpc_parse_download_files(struct aria_download *d, struct json_node *node) {
 			else if (0 == strcmp(field->key, "path"))
 				file.path = strlen(field->val.str) > 0 ? strdup(field->val.str) : NULL;
 			else if (0 == strcmp(field->key, "length"))
-				file.total_size = strtoull(field->val.str, NULL, 10);
+				file.total = strtoull(field->val.str, NULL, 10);
 			else if (0 == strcmp(field->key, "completedLength"))
 				file.have = strtoull(field->val.str, NULL, 10);
 			else if (0 == strcmp(field->key, "selected")) {
@@ -316,7 +316,7 @@ else if (0 == strcmp(field->key, name)) \
 d->local = strto##type(field->val.str, NULL, 10);
 		else_if_FIELD(download_speed, "downloadSpeed", ul)
 		else_if_FIELD(upload_speed, "uploadSpeed", ul)
-		else_if_FIELD(total_size, "totalLength", ull)
+		else_if_FIELD(total, "totalLength", ull)
 		else_if_FIELD(have, "completedLength", ull)
 		else_if_FIELD(uploaded, "uploadLength", ull)
 		/* else_if_FIELD(num_seeders, "numSeeders", ul) */
@@ -326,8 +326,8 @@ d->local = strto##type(field->val.str, NULL, 10);
 			struct aria_download **dd = get_download_bygid(field->val.str);
 			d->following = NULL != dd ? *dd : NULL;
 		} else if (0 == strcmp(field->key, "belongsTo")) {
-			assert(!"eeeeeeeee");
 			struct aria_download **dd = get_download_bygid(field->val.str);
+			assert(!"eeeeeeeee");
 			d->belongs_to = NULL != dd ? *dd : NULL;
 		}
 	} while (NULL != (field = json_next(field)));

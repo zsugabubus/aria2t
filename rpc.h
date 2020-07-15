@@ -43,7 +43,7 @@ struct aria_uri {
 
 struct aria_file {
 	char *path;
-	uint64_t total_size;
+	uint64_t total;
 	uint64_t have;
 	unsigned selected: 1;
 	uint32_t num_uris;
@@ -64,7 +64,6 @@ struct aria_peer {
 };
 
 struct aria_download {
-
 	char const *name;
 	char gid[16 + 1];
 	uint8_t refcnt;
@@ -80,7 +79,7 @@ struct aria_download {
 	uint32_t num_seeders;
 	uint32_t num_connections;
 
-	uint64_t total_size;
+	uint64_t total;
 	uint64_t have;
 	uint64_t uploaded;
 	char *progress;
@@ -100,6 +99,12 @@ struct aria_globalstat {
 	uint64_t upload_speed;
 	uint64_t download_speed_limit;
 	uint64_t upload_speed_limit;
+
+	uint64_t upload_total;
+	/* uint64_t progress_total_total;
+	uint64_t progress_have_total; */
+	uint64_t have_total;
+	uint8_t compute_total;
 
 	unsigned optimize_concurrency: 1;
 	unsigned save_session: 1;
