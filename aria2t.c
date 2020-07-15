@@ -129,11 +129,6 @@ draw_file(struct aria_download const *d, size_t i, int *y)
 
 	for (j = 0; j < f->num_uris; ++j) {
 		struct aria_uri const *uri = &f->uris[j];
-		static char const *const URI_STATUS[aria_uri_status_count] = {
-			"?",
-			"*",
-			" "
-		};
 
 		attr_set(A_NORMAL, 0, NULL);
 		mvprintw((*y)++, 0, "      %s╴",
@@ -775,9 +770,10 @@ stripwhite(char *str, size_t *n)
 static void
 on_session_info(struct json_node *result, void *data)
 {
+	char *tmp = getenv("TMP");
+
 	(void)data;
 
-	char *tmp = getenv("TMP");
 	snprintf(tempfile, sizeof tempfile, "/%s/aria2.%s",
 			NULL != tmp ? tmp : "tmp",
 			rpc_parse_session_info(result));
@@ -833,7 +829,9 @@ fileout(int mustedit)
 
 	refresh();
 
-	return WIFEXITED(status) && EXIT_SUCCESS == WEXITSTATUS(status);
+	return WIFEXITED(status) && EXIT_SUCCESS == WEXITSTATUS(status)
+		? EXIT_SUCCESS
+		: EXIT_FAILURE;
 }
 
 static void
@@ -870,6 +868,54 @@ on_options(struct json_node *result, struct aria_download *d)
 	rpc_parse_options(result, parse_option, d);
 }
 
+/* Returns:
+ * - <0: action did not run.
+ * - =0: action executed and terminated successfully.
+ * - >0: action executed but failed. */
+static int
+runaction(const char *name, ...)
+{
+	char filename[PATH_MAX];
+	char filepath[PATH_MAX];
+	va_list argptr;
+	pid_t pid;
+	int status;
+
+	va_start(argptr, name);
+	vsnprintf(filename, sizeof filename, name, argptr);
+	va_end(argptr);
+
+	if (getenv("ARIA2T_CONFIG"))
+		snprintf(filepath, sizeof filepath, "%s/actions/%s",
+				getenv("ARIA2T_CONFIG"), filename);
+	else if (getenv("HOME"))
+		snprintf(filepath, sizeof filepath, "%s/.config/aria2t/actions/%s",
+				getenv("HOME"), filename);
+	else
+		return -1;
+
+	def_prog_mode();
+	endwin();
+
+	if (0 == (pid = fork())) {
+		execlp(filepath, filepath,
+				num_downloads > 0 ? downloads[selidx]->gid : NULL,
+				tempfile,
+				NULL);
+		_exit(127);
+	}
+
+	while (-1 == waitpid(pid, &status, 0) && errno == EINTR)
+		;
+
+	refresh();
+
+	if (WIFEXITED(status) && 127 == WEXITSTATUS(status))
+		return -1;
+	else
+		return WIFEXITED(status) && EXIT_SUCCESS == WEXITSTATUS(status) ? 0 : 1;
+}
+
 static void
 on_show_options(struct json_node *result, struct aria_download *d)
 {
@@ -878,6 +924,7 @@ on_show_options(struct json_node *result, struct aria_download *d)
 	char *line;
 	size_t linesiz;
 	struct rpc_handler *handler;
+	int action;
 
 	/* FIXME: error handling */
 
@@ -889,7 +936,10 @@ on_show_options(struct json_node *result, struct aria_download *d)
 
 	fclose(f);
 
-	if (!fileout(0))
+	if ((action = runaction(NULL != d ? "i" : "I")) < 0)
+		action = fileout(0);
+
+	if (EXIT_SUCCESS != action)
 		return;
 
 	if (NULL == (f = fopen(tempfile, "r")))
@@ -1007,7 +1057,7 @@ ar_download_select_files(void)
 }
 
 static void
-ar_download_add(void)
+ar_download_add(char ch)
 {
 	struct rpc_handler *handler;
 	FILE *f;
@@ -1015,8 +1065,12 @@ ar_download_add(void)
 	size_t linesiz;
 	ssize_t err;
 	size_t linelen;
+	int action;
 
-	if (!fileout(1))
+	if ((action = runaction("%c", ch)) < 0)
+		action = fileout(1);
+
+	if (EXIT_SUCCESS != action)
 		return;
 
 	/* FIXME: error handling */
@@ -1383,50 +1437,6 @@ ar_update_delta(int all)
 	rpc_writer_epilog(handler);
 }
 
-static int
-runaction(const char *name, ...)
-{
-	char filename[PATH_MAX];
-	char filepath[PATH_MAX];
-	va_list argptr;
-	pid_t pid;
-	int status;
-
-	va_start(argptr, name);
-	vsnprintf(filename, sizeof filename, name, argptr);
-	va_end(argptr);
-
-	if (getenv("ARIA2T_CONFIG"))
-		snprintf(filepath, sizeof filepath, "%s/actions/%s",
-				getenv("ARIA2T_CONFIG"), filename);
-	else if (getenv("HOME"))
-		snprintf(filepath, sizeof filepath, "%s/.config/aria2t/actions/%s",
-				getenv("HOME"), filename);
-	else
-		return -1;
-
-	def_prog_mode();
-	endwin();
-
-	if (0 == (pid = fork())) {
-		execlp(filepath, filepath,
-				num_downloads > 0 ? downloads[selidx]->gid : NULL,
-				tempfile,
-				NULL);
-		_exit(127);
-	}
-
-	while (-1 == waitpid(pid, &status, 0) && errno == EINTR)
-		;
-
-	refresh();
-
-	if (WIFEXITED(status) && 127 == WEXITSTATUS(status))
-		return -1;
-	else
-		return WIFEXITED(status) && EXIT_SUCCESS == WEXITSTATUS(status);
-}
-
 static void
 writetemp(void)
 {
@@ -1450,6 +1460,13 @@ writetemp(void)
 	}
 
 	fclose(f);
+}
+
+static void
+on_download_remove(struct json_node *result, void *data)
+{
+	writetemp();
+	runaction("D");
 }
 
 static int
@@ -1519,12 +1536,14 @@ stdin_read(void)
 			break;
 
 		case 'g':
+		case KEY_HOME:
 			selidx = 0;
 			draw_cursor();
 			refresh();
 			break;
 
 		case 'G':
+		case KEY_END:
 			selidx = INT_MAX;
 			draw_cursor();
 			refresh();
@@ -1546,8 +1565,7 @@ stdin_read(void)
 		case 'a':
 		case 'A':
 		case '+':
-			runaction("%c", ch);
-			ar_download_add();
+			ar_download_add(ch);
 			break;
 
 		case 'i':
@@ -1564,26 +1582,8 @@ stdin_read(void)
 			if (num_downloads > 0) {
 				aria_download_remove(downloads[selidx], do_forced);
 				do_forced = 0;
-				writetemp();
-				runaction("D");
 			}
 			break;
-
-		/* case KEY_F(1):
-		case KEY_F(2):
-		case KEY_F(3):
-		case KEY_F(4):
-		case KEY_F(5):
-		case KEY_F(6):
-		case KEY_F(7):
-		case KEY_F(8):
-		case KEY_F(9):
-		case KEY_F(10):
-		case KEY_F(11):
-		case KEY_F(12):
-			#<{(| nice |)}>#
-			runaction("F%d", ch - KEY_F(0));
-			break; */
 
 		case '!':
 			do_forced = 1;
@@ -1653,6 +1653,7 @@ stdin_read(void)
 		defaction:
 			writetemp();
 			runaction("%s", keyname(ch));
+			do_forced = 0;
 			break;
 
 		}
