@@ -1601,6 +1601,18 @@ stdin_read(void)
 			refresh();
 			break;
 
+		case KEY_NPAGE:
+			selidx += getmainheight();
+			draw_cursor();
+			refresh();
+			break;
+
+		case KEY_PPAGE:
+			selidx -= getmainheight();
+			draw_cursor();
+			refresh();
+			break;
+
 		case 'g':
 		case KEY_HOME:
 			selidx = 0;
