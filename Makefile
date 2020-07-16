@@ -18,8 +18,8 @@ aria2t : PACKAGES := ncursesw
 # $(TARGETS) : LDLIBS  += $(shell $(PKGCONFIG) --libs $(PACKAGES))
 $(TARGETS) : LDLIBS += -lncursesw
 $(TARGETS) : LDFLAGS += $(shell $(PKGCONFIG) --cflags $(PACKAGES))
-$(TARGETS) : %: %.c program.? rpc.? format.? websocket.? b64.? jeezson/jeezson.? Makefile
-	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $(LDLIBS) $@.c program.c rpc.c format.c websocket.c b64.c jeezson/jeezson.c
+$(TARGETS) : %: %.c program.? format.? websocket.? b64.? jeezson/jeezson.? Makefile
+	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $(LDLIBS) $@.c program.c format.c websocket.c b64.c jeezson/jeezson.c
 
 bootstrap :
 	git submodule update --init --recursive
