@@ -520,7 +520,7 @@ on_downloads_changed(int stickycurs)
 	if (num_downloads > 0) {
 		char selgid[sizeof ((struct aria_download *)0)->gid];
 
-		if (selidx > num_downloads)
+		if (selidx >= num_downloads)
 			selidx = num_downloads - 1;
 		memcpy(selgid, downloads[selidx]->gid, sizeof selgid);
 
@@ -814,8 +814,6 @@ file_b64_enc(char *pathname)
 		return NULL;
 
 	b64 = b64_enc(buf, st.st_size, &b64len);
-	if (NULL != b64)
-		b64[b64len] = '\0';
 
 	(void)munmap(buf, st.st_size);
 
@@ -1194,9 +1192,11 @@ ar_download_add(char ch)
 		case kind_torrent:
 			json_write_str(jw, "aria2.addTorrent");
 			break;
+
 		case kind_metalink:
 			json_write_str(jw, "aria2.addMetalink");
 			break;
+
 		case kind_uri:
 			json_write_str(jw, "aria2.addUri");
 			break;

@@ -11,7 +11,7 @@ b64_enc(const unsigned char *str, size_t n, size_t *outn)
 		"0123456789+/";
 
 	size_t i, j;
-	char *out = malloc((*outn = ((n + 2) / 3) * 4));
+	char *out = malloc((*outn = ((n + 2) / 3) * 4) + 1);
 	if (out == NULL)
 		return NULL;
 
@@ -45,5 +45,6 @@ b64_enc(const unsigned char *str, size_t n, size_t *outn)
 		break;
 	}
 
+	out[j] = '\0';
 	return out;
 }
