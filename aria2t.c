@@ -29,7 +29,7 @@
  * also handle removed dls
  * TODO: following downloads
  * */
-	
+
 static int namecol;
 static int retcode = EXIT_FAILURE;
 
@@ -403,7 +403,7 @@ draw_download(struct aria_download const *d, int y, struct aria_download const *
 			mvaddstr(y, x, " @ "), x += 3;
 
 			attr_set(A_BOLD, COLOR_DOWN, NULL);
-			mvaddstr(y, x, "  "), x += 3;
+			mvaddstr(y, x, " ↓ "), x += 3;
 
 			n = fmt_speed(fmtbuf, d->download_speed);
 			mvaddnstr(y, x, fmtbuf, n), x += n;
@@ -446,7 +446,7 @@ draw_download(struct aria_download const *d, int y, struct aria_download const *
 		if (d->uploaded > 0) {
 			if (d->upload_speed > 0)
 				attr_set(A_BOLD, COLOR_UP, NULL);
-			mvaddstr(y, x, "  "), x += 3;
+			mvaddstr(y, x, " ↑ "), x += 3;
 
 			n = fmt_space(fmtbuf, d->uploaded);
 			mvaddnstr(y, x, fmtbuf, n), x += n;
@@ -634,7 +634,8 @@ draw_statusline(void)
 	n = fmt_speed(fmtbuf, globalstat.upload_total);
 	mvaddnstr(y, x -= n, fmtbuf, n);
 
-	mvaddstr(y, x -= 3, "  ");
+	attr_set(globalstat.upload_speed > 0 ? A_BOLD : A_NORMAL, 0, NULL);
+	mvaddstr(y, x -= 3, " ↑ ");
 	attr_set(A_NORMAL, 0, NULL);
 
 	/* download */
@@ -654,7 +655,8 @@ draw_statusline(void)
 	n = fmt_speed(fmtbuf, globalstat.have_total);
 	mvaddnstr(y, x -= n, fmtbuf, n);
 
-	mvaddstr(y, x -= 3, "  ");
+	attr_set(globalstat.download_speed > 0 ? A_BOLD : A_NORMAL, 0, NULL);
+	mvaddstr(y, x -= 3, " ↓ ");
 	attr_set(A_NORMAL, 0, NULL);
 
 	move(view == 'd' ? selidx - topidx : 0, namecol);
