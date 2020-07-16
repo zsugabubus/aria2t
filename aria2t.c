@@ -2463,7 +2463,7 @@ stdin_read(void)
 
 		case 'V':
 			if (!(view = strchr(VIEWS + 1, view)[-1])) {
-				view = VIEWS[ARRAY_LEN(VIEWS) - 1];
+				view = VIEWS[ARRAY_LEN(VIEWS) - 2];
 				oldselidx = -1; /* force redraw */
 			}
 
