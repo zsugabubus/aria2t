@@ -71,6 +71,8 @@ struct aria_download {
 	int status;
 	uint32_t queue_index;
 
+	char *error_message;
+
 	uint32_t num_files;
 	uint32_t num_selfiles;
 	/* uint32_t num_pieces;

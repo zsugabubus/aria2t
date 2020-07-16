@@ -3,6 +3,6 @@
 
 #include <stddef.h>
 
-char *b64_enc(const char *str, size_t n, size_t *outn);
+char *b64_enc(const unsigned char *str, size_t n, size_t *outn);
 
 #endif

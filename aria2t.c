@@ -310,6 +310,9 @@ draw_download(struct aria_download const *d, int y, struct aria_download const *
 	case DOWNLOAD_ERROR:
 		mvaddstr(y, x, "* "), x += 2;
 		attr_set(A_NORMAL, 0, NULL);
+		mvaddstr(y, x, d->error_message);
+		x += 30;
+		attr_set(A_NORMAL, 0, NULL);
 		break;
 
 	case DOWNLOAD_WAITING:
@@ -517,6 +520,8 @@ on_downloads_changed(int stickycurs)
 	if (num_downloads > 0) {
 		char selgid[sizeof ((struct aria_download *)0)->gid];
 
+		if (selidx > num_downloads)
+			selidx = num_downloads - 1;
 		memcpy(selgid, downloads[selidx]->gid, sizeof selgid);
 
 		/* FIXME: conversion maybe not valid */
@@ -595,7 +600,7 @@ draw_statusline(void)
 
 	printw("[%c %4d/%-4d] [%4d/%4d|%4d] [%s%s%dc] @ %s:%d%s%s%s",
 			view,
-			selidx + 1, num_downloads,
+			num_downloads > 0 ? selidx + 1 : 0, num_downloads,
 			globalstat.num_active,
 			globalstat.num_waiting,
 			globalstat.num_stopped_total,
@@ -1410,6 +1415,9 @@ ar_update_delta(int all)
 		for (;n-- > 0; ++dd) {
 			struct aria_download *d = *dd;
 
+			if (d->status < 0)
+				globalstat.compute_total = 1;
+
 			json_write_beginobj(jw);
 			json_write_key(jw, "methodName");
 			json_write_str(jw, "aria2.tellStatus");
@@ -1422,16 +1430,15 @@ ar_update_delta(int all)
 			/* “keys” */
 			json_write_beginarr(jw);
 
-			if (d->status < 0)
-				globalstat.compute_total = 1;
-
-			if (DOWNLOAD_REMOVED == abs(d->status))
-				continue;
-
 			json_write_str(jw, "gid");
-			json_write_str(jw, "status");
+
+			if (DOWNLOAD_REMOVED != abs(d->status))
+				json_write_str(jw, "status");
+
 			if (NULL == d->name && d->status < 0) {
-				json_write_str(jw, "seeder");
+				if (DOWNLOAD_REMOVED != abs(d->status))
+					json_write_str(jw, "seeder");
+
 				json_write_str(jw, "bittorrent");
 			} else if (NULL == d->name && NULL == d->files && d->status >= 0) {
 				/* If “bittorrent.info.name” is empty then
@@ -1463,8 +1470,9 @@ ar_update_delta(int all)
 
 			switch (abs(d->status)) {
 			case DOWNLOAD_ERROR:
-				if (d->status < 0)
+				if (d->status < 0 || NULL == d->error_message) {
 					json_write_str(jw, "errorMessage");
+				}
 				break;
 
 			case DOWNLOAD_WAITING:

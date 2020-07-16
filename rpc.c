@@ -134,19 +134,20 @@ on_ws_message(char *msg, size_t msglen)
 
 	if (NULL != (id = json_get(nodes, "id"))) {
 		struct json_node *const result = json_get(nodes, "result");
-		struct rpc_handler *const handler = &rpc_handlers[(unsigned)id->val.num];
-
-		assert(NULL != handler->proc);
 
 		free(last_error);
 		last_error = NULL;
 
-		if (NULL != result)
-			handler->proc(result, handler->data);
-		else
-			rpc_on_error(json_get(nodes, "error"));
+		if (NULL != result) {
+			struct rpc_handler *const handler = &rpc_handlers[(unsigned)id->val.num];
 
-		handler->proc = NULL;
+			assert(NULL != handler->proc);
+			handler->proc(result, handler->data);
+			handler->proc = NULL;
+		} else {
+			rpc_on_error(json_get(nodes, "error"));
+		}
+
 	} else if (NULL != (method = json_get(nodes, "method"))) {
 		struct json_node *const params = json_get(nodes, "params");
 
@@ -329,6 +330,9 @@ d->local = strto##type(field->val.str, NULL, 10);
 			struct aria_download **dd = get_download_bygid(field->val.str);
 			assert(!"eeeeeeeee");
 			d->belongs_to = NULL != dd ? *dd : NULL;
+		} else if (0 == strcmp(field->key, "errorMessage")) {
+			free(d->error_message);
+			d->error_message = strdup(field->val.str);
 		}
 	} while (NULL != (field = json_next(field)));
 
