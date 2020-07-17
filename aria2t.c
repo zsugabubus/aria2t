@@ -2703,7 +2703,7 @@ stdin_read(void)
 			break;
 
 		case 'Q':
-			if (runaction("Q") != EXIT_FAILURE)
+			if (runaction(NULL, "Q") != EXIT_FAILURE)
 				aria_shutdown(do_forced);
 			do_forced = 0;
 			break;
