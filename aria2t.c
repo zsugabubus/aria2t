@@ -32,6 +32,8 @@
  * TODO: following downloads
  * */
 
+static char const *const NONAME = "?";
+
 static int curcol = 0;
 static int retcode = EXIT_FAILURE;
 
@@ -195,7 +197,7 @@ ref_download(struct aria_download *d)
 void
 unref_download(struct aria_download *d)
 {
-	assert(d->refcnt > 1);
+	assert(d->refcnt >= 1);
 	if (0 == --d->refcnt)
 		free_download(d);
 }
@@ -241,12 +243,9 @@ void aria_remove_result(struct aria_download *d);
 enum pos_how { POS_SET, POS_CUR, POS_END };
 void aria_download_repos(struct aria_download *d, int32_t pos, enum pos_how how);
 
-void parse_downloads(struct json_node *result);
-void parse_download(struct aria_download *d, struct json_node *node);
 void parse_download_files(struct aria_download *d, struct json_node *node);
 void parse_globalstat(struct json_node *node);
 void parse_options(struct json_node *node, void(*cb)(char const *, char const *, void *), void *arg);
-char *parse_session_info(struct json_node *node);
 void rpc_on_download_status_change(struct aria_download *d);
 
 void update_display_name(struct aria_download *d);
@@ -336,6 +335,7 @@ new_download(void)
 		return NULL;
 
 	d->refcnt = 1;
+	d->display_name = NONAME;
 	(downloads = p)[num_downloads++] = d;
 
 	return d;
@@ -378,14 +378,25 @@ get_download_bygid(char const*gid)
 }
 
 static void
+clear_last_error(void)
+{
+	free(last_error), last_error = NULL;
+	draw_statusline();
+}
+
+static void
+set_last_error(char const *message)
+{
+	free(last_error), last_error = strdup(message);
+	draw_statusline();
+}
+
+static void
 error_handler(struct json_node *error)
 {
 	struct json_node const *message = json_get(error, "message");
 
-	free(last_error);
-	last_error = strdup(message->val.str);
-
-	draw_statusline();
+	set_last_error(message->val.str);
 	refresh();
 }
 
@@ -563,10 +574,10 @@ update_display_name(struct aria_download *d)
 		}
 	}
 
-	d->display_name = "?";
+	d->display_name = NONAME;
 }
 
-void
+static void
 parse_download(struct aria_download *d, struct json_node *node)
 {
 	struct json_node *field = json_children(node);
@@ -626,7 +637,7 @@ d->local = strto##type(field->val.str, NULL, 10);
 	update_display_name(d);
 }
 
-char *
+static char *
 parse_session_info(struct json_node *node)
 {
 	/* First kv-pair.  */
@@ -683,9 +694,20 @@ parse_globalstat(struct json_node *node)
 	} while (NULL != (node = json_next(node)));
 }
 
-void
+static void
+update_delta(int all);
+
+static int
+download_insufficient(struct aria_download *d)
+{
+	return d->display_name == NONAME || (-DOWNLOAD_ERROR == d->status && NULL == d->error_message);
+}
+
+static void
 parse_downloads(struct json_node *result)
 {
+	int some_insufficient = 0; /* FIXME? it can cause an infinity loop */
+
 	if (NULL == result)
 		return;
 
@@ -715,8 +737,12 @@ parse_downloads(struct json_node *result)
 				d->following = d;
 
 			parse_download(d, node);
+			some_insufficient |= download_insufficient(d);
 		}
 	}
+
+	if (some_insufficient)
+		update_delta(1);
 }
 
 void
@@ -1154,7 +1180,7 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 	case DOWNLOAD_ERROR:
 		addstr("* ");
 		attr_set(A_BOLD, COLOR_ERR, NULL);
-		printw("%-30s", NULL != d->error_message && strlen(d->error_message) <= 30 ? d->error_message : "");
+		printw("%-30.*s", 30, NULL != d->error_message && (strlen(d->error_message) <= 30 || view == VIEWS[1]) ? d->error_message : "");
 		attr_set(A_NORMAL, 0, NULL);
 		break;
 
@@ -1318,7 +1344,7 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 
 	switch (abs(d->status)) {
 	case DOWNLOAD_ERROR:
-		if (NULL != d->error_message && strlen(d->error_message) > 30) {
+		if (view != VIEWS[1] && NULL != d->error_message && strlen(d->error_message) > 30) {
 			attr_set(A_BOLD, COLOR_ERR, NULL);
 			mvaddstr(*y, 0, "  ");
 			addstr(d->error_message);
@@ -1424,6 +1450,8 @@ draw_cursor(void)
 		move(view == VIEWS[1] ? selidx - topidx : 0, curcol);
 	} else if (oldselidx != selidx) {
 		on_scroll_changed();
+		/* update now seen downloads */
+		update_delta(1);
 	}
 
 	if (oldselidx != selidx) {
@@ -1529,11 +1557,10 @@ draw_all(void)
 }
 
 static void
-update_delta(int all);
-
-static void
 on_update_all(struct json_node *result, void *data)
 {
+	int some_insufficient = 0;
+
 	(void)data;
 
 	if (NULL == result)
@@ -1574,6 +1601,8 @@ on_update_all(struct json_node *result, void *data)
 				/* FIXME: ... or not. there is some serious shit around it */
 				d->queue_index = (num_downloads - 1) - downloadidx;
 			}
+
+			some_insufficient |= download_insufficient(d);
 		} while (NULL != (node = json_next(node)));
 
 	} while (NULL != (result = json_next(result)));
@@ -1581,7 +1610,8 @@ on_update_all(struct json_node *result, void *data)
 	on_downloads_changed(0);
 	refresh();
 
-	update_delta(1);
+	if (some_insufficient)
+		update_delta(1);
 }
 
 static void
@@ -1838,8 +1868,10 @@ parse_option(char const *option, char const *value, struct aria_download *d)
 static void
 on_options(struct json_node *result, struct aria_download *d)
 {
-	if (NULL != result)
+	if (NULL != result) {
+		clear_last_error();
 		parse_options(result, parse_option, d);
+	}
 
 	if (NULL != d)
 		unref_download(d);
@@ -1858,6 +1890,7 @@ on_show_options(struct json_node *result, struct aria_download *d)
 	if (NULL == result)
 		goto out;
 
+	clear_last_error();
 	/* FIXME: error handling */
 
 	if (NULL == (f = fopen(tempfile, "w")))
@@ -1991,6 +2024,74 @@ ar_download_select_files(void)
 }
 #endif
 
+struct downloads_add_data {
+	size_t nlines;
+	char **lines;
+};
+
+/* select (last) newly added download and write back errorneous files */
+static void
+on_downloads_add(struct json_node *result, struct downloads_add_data *data)
+{
+	FILE *f;
+	size_t n;
+
+	if (NULL == result) {
+		if (NULL != data) {
+			while (data->nlines > 0)
+				free(data->lines[--data->nlines]);
+			free(data);
+		}
+		return;
+	}
+
+	if (json_isempty(result))
+		goto out;
+
+	f = NULL != data ? fopen(tempfile, "w") : NULL;
+
+	n = 0;
+	result = json_children(result);
+	do {
+		struct aria_download **dd;
+
+		switch (json_type(result)) {
+		case json_obj:
+			error_handler(result);
+
+			if (NULL != f)
+				fputs(data->lines[n], f);
+			break;
+
+		case json_str:
+			if (NULL != (dd = get_download_bygid(result->val.str)))
+				selidx = dd - downloads;
+			break;
+
+		case json_arr:
+			if (NULL != (dd = get_download_bygid(json_children(json_children(result))->val.str)))
+				selidx = dd - downloads;
+			break;
+
+		default:
+			assert(!"unexpected result type");
+		}
+
+		if (NULL != data)
+			free(data->lines[n]);
+		++n;
+	} while (NULL != (result = json_next(result)));
+
+	if (NULL != f)
+		fclose(f);
+
+out:
+	if (NULL != data) {
+		free(data->lines);
+		free(data);
+	}
+}
+
 static void
 add_downloads(char cmd)
 {
@@ -2001,12 +2102,15 @@ add_downloads(char cmd)
 	ssize_t err;
 	size_t linelen;
 	int action;
+	struct downloads_add_data *data;
 
 	if ((action = runaction(NULL, "%c", cmd)) < 0)
 		action = fileout(1);
 
 	if (EXIT_SUCCESS != action)
 		return;
+
+	clear_last_error();
 
 	/* FIXME: error handling */
 	if (NULL == (f = fopen(tempfile, "r"))) {
@@ -2017,6 +2121,9 @@ add_downloads(char cmd)
 	if (NULL == handler)
 		return;
 
+	data = malloc(sizeof *data);
+
+	handler->proc = on_downloads_add;
 	json_write_int(jw, (int)(handler - rpc_handlers));
 
 	json_write_key(jw, "method");
@@ -2027,11 +2134,25 @@ add_downloads(char cmd)
 	/* 1st arg: “methods” */
 	json_write_beginarr(jw); /* {{{ */
 
+	data->lines = NULL, data->nlines = 0;
 	line = NULL, linesiz = 0;
 	while (-1 != (err = getline(&line, &linesiz, f))) {
 		char *uri;
 		char *b64str = NULL;
 		enum { kind_torrent, kind_metalink, kind_uri } kind;
+
+		if (NULL != data) {
+			char **newlines;
+
+			if (NULL != (newlines = realloc(data->lines, ++data->nlines * sizeof *data->lines))) {
+				(data->lines = newlines)[data->nlines - 1] = strdup(line);
+			} else {
+				free(data->lines);
+				free(data);
+				data = NULL;
+			}
+
+		}
 
 		linelen = (size_t)err;
 		uri = stripwhite(line, &linelen);
@@ -2092,19 +2213,12 @@ add_downloads(char cmd)
 		if (kind_torrent == kind) {
 			/* “uris” */
 			json_write_beginarr(jw);
+			/* (none) */
 			json_write_endarr(jw);
 		}
 		/* “options” */
 		json_write_beginobj(jw);
-		{
-			char buf[PATH_MAX];
-			char *cwd;
-			json_write_key(jw, "dir");
-			if (NULL == (cwd = getcwd(buf, sizeof buf)))
-				strcpy(buf, ".");
-
-			json_write_str(jw, cwd);
-		}
+		/* (none) */
 		json_write_endobj(jw);
 		/* “position” */
 		/* insert position at specified queue index */
@@ -2121,6 +2235,8 @@ add_downloads(char cmd)
 
 	json_write_endarr(jw); /* }}} */
 	json_write_endarr(jw);
+
+	handler->data = data;
 
 	rpc_writer_epilog(handler);
 }
@@ -2222,8 +2338,8 @@ try_connect(void)
 		return;
 	}
 
-	free(last_error), last_error = NULL;
 	fds[1].fd = ws_fd;
+	clear_last_error();
 
 	if (tempfile[0])
 		unlink(tempfile);
@@ -2587,16 +2703,9 @@ stdin_read(void)
 			break;
 
 		case 'Q':
-			aria_shutdown(do_forced);
+			if (runaction("Q") != EXIT_FAILURE)
+				aria_shutdown(do_forced);
 			do_forced = 0;
-			break;
-
-		case 'u':
-			update_delta(0);
-			break;
-
-		case 'U':
-			update_delta(1);
 			break;
 
 		case CONTROL('L'):
