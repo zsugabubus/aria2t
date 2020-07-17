@@ -108,7 +108,7 @@ struct aria_peer {
 
 struct aria_download {
 	char *name;
-	char *display_name;
+	char const *display_name;
 	char gid[16 + 1];
 
 	uint8_t refcnt;
