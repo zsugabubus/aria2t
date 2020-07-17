@@ -20,6 +20,8 @@
 #endif
 #include <stdint.h>
 #include <netinet/in.h>
+#include <sys/types.h>
+#include <sys/xattr.h>
 
 #include "websocket.h"
 #include "jeezson/jeezson.h"
@@ -32,6 +34,8 @@
  * TODO: following downloads
  * */
 
+#define XATTR_NAME "user.tags"
+
 static char const *const NONAME = "?";
 
 static int curcol = 0;
@@ -41,6 +45,12 @@ static int do_forced = 0;
 static int oldselidx = 0;
 static int selidx = 0;
 static int topidx = 0;
+
+
+static int is_local = 0; /* server runs on local host */
+static int downloads_need_reflow = 0;
+static int tag_col_width = 0;
+static struct aria_download const *longest_tag;
 
 static char tempfile[PATH_MAX];
 static struct pollfd fds[
@@ -109,6 +119,7 @@ struct aria_peer {
 struct aria_download {
 	char *name;
 	char const *display_name;
+	char *tags;
 	char gid[16 + 1];
 
 	uint8_t refcnt;
@@ -153,8 +164,6 @@ static void draw_downloads(void);
 static void draw_download(struct aria_download const *d, struct aria_download const *root, int *y);
 static void draw_cursor(void);
 
-struct aria_download **get_download_bygid(char const *gid);
-
 static void
 free_uri(struct aria_uri *u)
 {
@@ -174,16 +183,24 @@ free_file(struct aria_file *f)
 }
 
 static void
-free_download(struct aria_download *d)
+free_download_files(struct aria_download *d)
 {
 	uint32_t i;
 
-	if (NULL != d->files)
-		for (i = 0; i < d->num_files; ++i)
-			free_file(&d->files[i]);
+	if (NULL == d->files)
+		return;
 
+	for (i = 0; i < d->num_files; ++i)
+		free_file(&d->files[i]);
+}
+
+static void
+free_download(struct aria_download *d)
+{
+	free_download_files(d);
 	free(d->name);
 	free(d->error_message);
+	free(d->tags);
 	free(d);
 }
 
@@ -235,21 +252,6 @@ int rpc_load_cfg(void);
 int rpc_connect(void);
 int rpc_shutdown(void);
 
-void aria_download_remove(struct aria_download *d, int force);
-void aria_shutdown(int force);
-void aria_download_pause(struct aria_download *d, int pause, int force);
-void aria_pause_all(int pause, int force);
-void aria_remove_result(struct aria_download *d);
-enum pos_how { POS_SET, POS_CUR, POS_END };
-void aria_download_repos(struct aria_download *d, int32_t pos, enum pos_how how);
-
-void parse_download_files(struct aria_download *d, struct json_node *node);
-void parse_globalstat(struct json_node *node);
-void parse_options(struct json_node *node, void(*cb)(char const *, char const *, void *), void *arg);
-void rpc_on_download_status_change(struct aria_download *d);
-
-void update_display_name(struct aria_download *d);
-
 typedef void(*rpc_handler)(struct json_node *result, void *data);
 
 struct rpc_handler {
@@ -259,9 +261,6 @@ struct rpc_handler {
 
 void rpc_writer_epilog(struct rpc_handler *handler);
 struct rpc_handler *rpc_writer_prolog(void);
-
-static struct json_node *nodes;
-static size_t nnodes;
 
 static struct aria_globalstat globalstat;
 
@@ -274,7 +273,7 @@ static struct json_writer jw[1];
 static struct rpc_handler rpc_handlers[10];
 
 static void
-on_rpc_notification(char const *method, struct json_node *event);
+on_notification(char const *method, struct json_node *event);
 
 static void
 default_handler(struct json_node *result, void *data)
@@ -330,13 +329,14 @@ new_download(void)
 	p = realloc(downloads, (num_downloads + 1) * sizeof *downloads);
 	if (NULL == p)
 		return NULL;
+	downloads = p;
 
 	if (NULL == (d = calloc(1, sizeof *d)))
 		return NULL;
 
 	d->refcnt = 1;
 	d->display_name = NONAME;
-	(downloads = p)[num_downloads++] = d;
+	downloads[num_downloads++] = d;
 
 	return d;
 }
@@ -356,8 +356,8 @@ rpc_handler_alloc(void)
 	return NULL;
 }
 
-struct aria_download **
-get_download_bygid(char const*gid)
+static struct aria_download **
+get_download_bygid(char const *gid)
 {
 	struct aria_download *d, **dd = downloads;
 	struct aria_download **const end = &downloads[num_downloads];
@@ -403,12 +403,15 @@ error_handler(struct json_node *error)
 int
 on_ws_message(char *msg, size_t msglen)
 {
+	static struct json_node *nodes;
+	static size_t num_nodes;
+
 	struct json_node *id;
 	struct json_node *method;
 
 	(void)msglen;
 
-	json_parse(msg, &nodes, &nnodes);
+	json_parse(msg, &nodes, &num_nodes);
 
 	if (NULL != (id = json_get(nodes, "id"))) {
 		struct json_node *const result = json_get(nodes, "result");
@@ -430,7 +433,7 @@ on_ws_message(char *msg, size_t msglen)
 	} else if (NULL != (method = json_get(nodes, "method"))) {
 		struct json_node *const params = json_get(nodes, "params");
 
-		on_rpc_notification(method->val.str, params + 1);
+		on_notification(method->val.str, params + 1);
 	} else {
 		assert(0);
 	}
@@ -440,7 +443,9 @@ on_ws_message(char *msg, size_t msglen)
 	return 0;
 }
 
-struct rpc_handler *rpc_writer_prolog() {
+struct rpc_handler *
+rpc_writer_prolog(void)
+{
 	json_write_beginobj(jw);
 
 	json_write_key(jw, "jsonrpc");
@@ -463,16 +468,48 @@ rpc_writer_epilog(struct rpc_handler *handler)
 	json_writer_empty(jw);
 }
 
-void
+static void
+update_tags(struct aria_download *d)
+{
+	char const *path;
+	ssize_t siz;
+	char *p;
+
+	/* no files to read from */
+	if (0 == d->num_files)
+		goto no_tags;
+
+	/* not downloaded yet */
+	if (NULL == (path = d->files[0].path))
+		goto no_tags;
+
+	if (NULL == d->tags)
+		d->tags = malloc(256);
+	if (NULL == d->tags)
+		goto no_tags;
+
+	if (-1 == (siz = getxattr(path, XATTR_NAME, d->tags, 255)))
+		goto no_tags;
+
+	is_local = 1;
+
+	d->tags[siz] = '\0';
+	/* transform tags: , -> ' ' */
+	for (p = d->tags; NULL != (p += strcspn(p, "\t\r\n")) && '\0' != *p; ++p)
+		*p = ' ';
+
+	return;
+
+no_tags:
+	free(d->tags), d->tags = NULL;
+}
+
+static void
 parse_download_files(struct aria_download *d, struct json_node *node)
 {
 	void *p;
 
-	if (d->files) {
-		size_t i;
-		for (i = 0; i < d->num_files; ++i)
-			free(d->files[i].path);
-	}
+	free_download_files(d);
 
 	d->num_files = json_len(node);
 	d->num_selfiles = 0;
@@ -541,9 +578,11 @@ parse_download_files(struct aria_download *d, struct json_node *node)
 		assert(index >= 0);
 		d->files[index] = file;
 	} while (NULL != (node = json_next(node)));
+
+	update_tags(d);
 }
 
-void
+static void
 update_display_name(struct aria_download *d)
 {
 	if (NULL != d->name) {
@@ -650,7 +689,7 @@ parse_session_info(struct json_node *node)
 	return NULL;
 }
 
-void
+static void
 parse_options(struct json_node *node, void(*cb)(char const *, char const *, void *), void *arg)
 {
 	if (json_isempty(node))
@@ -664,7 +703,7 @@ parse_options(struct json_node *node, void(*cb)(char const *, char const *, void
 	} while (NULL != (node = json_next(node)));
 }
 
-void
+static void
 parse_globalstat(struct json_node *node)
 {
 	if (json_arr != json_type(node))
@@ -700,7 +739,9 @@ update_delta(int all);
 static int
 download_insufficient(struct aria_download *d)
 {
-	return d->display_name == NONAME || (-DOWNLOAD_ERROR == d->status && NULL == d->error_message);
+	return d->display_name == NONAME ||
+		(-DOWNLOAD_ERROR == d->status && NULL == d->error_message) ||
+		(is_local && 0 == d->num_files);
 }
 
 static void
@@ -745,7 +786,9 @@ parse_downloads(struct json_node *result)
 		update_delta(1);
 }
 
-void
+enum pos_how { POS_SET, POS_CUR, POS_END };
+
+static void
 aria_download_repos(struct aria_download *d, int32_t pos, enum pos_how how)
 {
 	static char const *const POS_HOW[] = {
@@ -779,7 +822,7 @@ aria_download_repos(struct aria_download *d, int32_t pos, enum pos_how how)
 
 }
 
-void
+static void
 aria_download_remove(struct aria_download *d, int force)
 {
 	struct rpc_handler *handler = rpc_writer_prolog();
@@ -802,7 +845,7 @@ aria_download_remove(struct aria_download *d, int force)
 	rpc_writer_epilog(handler);
 }
 
-void
+static void
 aria_shutdown(int force)
 {
 	struct rpc_handler *handler = rpc_writer_prolog();
@@ -823,7 +866,7 @@ aria_shutdown(int force)
 	rpc_writer_epilog(handler);
 }
 
-void
+static void
 aria_pause_all(int pause, int force)
 {
 	struct rpc_handler *handler = rpc_writer_prolog();
@@ -844,7 +887,7 @@ aria_pause_all(int pause, int force)
 	rpc_writer_epilog(handler);
 }
 
-void
+static void
 aria_download_pause(struct aria_download *d, int pause, int force)
 {
 	struct rpc_handler *handler = rpc_writer_prolog();
@@ -867,7 +910,7 @@ aria_download_pause(struct aria_download *d, int pause, int force)
 	rpc_writer_epilog(handler);
 }
 
-void
+static void
 aria_remove_result(struct aria_download *d)
 {
 	struct rpc_handler *handler = rpc_writer_prolog();
@@ -893,7 +936,19 @@ aria_remove_result(struct aria_download *d)
 }
 
 static void
-on_rpc_notification(char const *method, struct json_node *event)
+on_downloads_change(int stickycurs);
+
+static void
+on_download_status_change(struct aria_download *d)
+{
+	(void)d;
+
+	on_downloads_change(1);
+	refresh();
+}
+
+static void
+on_notification(char const *method, struct json_node *event)
 {
 	char *const gid = json_get(event, "gid")->val.str;
 	struct aria_download **dd = get_download_bygid(gid);
@@ -928,7 +983,7 @@ on_rpc_notification(char const *method, struct json_node *event)
 
 	if (newstatus != d->status) {
 		d->status = -newstatus;
-		rpc_on_download_status_change(d);
+		on_download_status_change(d);
 	}
 }
 
@@ -1145,6 +1200,7 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 {
 	char fmtbuf[5];
 	int n;
+	int tagwidth;
 
 	(void)root;
 
@@ -1205,7 +1261,7 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 	print_completed:
 		attr_set(A_NORMAL, 0, NULL);
 
-		n = fmt_space(fmtbuf, d->total);
+		n = fmt_space(fmtbuf, 1024 * 1024 * 1024); /* d->total */
 		addnstr(fmtbuf, n);
 
 		addstr("[");
@@ -1337,6 +1393,30 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 	}
 
 	addstr(" ");
+	if (NULL != d->tags) {
+		int oy, ox, ny, nx, mx;
+
+		getyx(stdscr, oy, ox);
+
+		addstr(d->tags);
+
+		mx = getmaxx(stdscr);
+		getyx(stdscr, ny, nx);
+
+		tagwidth = (ny - oy) * mx + (nx - ox);
+		if (tag_col_width < tagwidth) {
+			longest_tag = d; /*no ref*/
+			tag_col_width = tagwidth;
+			downloads_need_reflow = 1;
+		}
+	} else {
+		tagwidth = 0;
+	}
+	if (0 < tag_col_width) {
+		printw("%*.s", tag_col_width - tagwidth, "");
+		addstr(" ");
+	}
+
 	curcol = getcurx(stdscr);
 	addstr(d->display_name);
 	clrtoeol();
@@ -1367,23 +1447,27 @@ draw_downloads(void)
 {
 	int line, height = getmainheight();
 
-	for (line = 0; line < height;) {
-		if ((size_t)(topidx + line) < num_downloads) {
-			draw_download(downloads[topidx + line], NULL, &line);
-		} else {
-			attr_set(A_NORMAL, COLOR_EOF, NULL);
-			mvaddstr(line, 0, "~");
-			attr_set(A_NORMAL, 0, NULL);
-			clrtoeol();
-			++line;
+	do {
+		downloads_need_reflow = 0;
+		assert(0 <= topidx);
+		for (line = 0; line < height;) {
+			if ((size_t)(topidx + line) < num_downloads) {
+				draw_download(downloads[topidx + line], NULL, &line);
+			} else {
+				attr_set(A_NORMAL, COLOR_EOF, NULL);
+				mvaddstr(line, 0, "~");
+				attr_set(A_NORMAL, 0, NULL);
+				clrtoeol();
+				++line;
+			}
 		}
-	}
+	} while (downloads_need_reflow);
 
 	draw_statusline();
 }
 
 static void
-on_downloads_changed(int stickycurs)
+on_downloads_change(int stickycurs)
 {
 	/* re-sort downloads list */
 	if (num_downloads > 0) {
@@ -1607,7 +1691,7 @@ on_update_all(struct json_node *result, void *data)
 
 	} while (NULL != (result = json_next(result)));
 
-	on_downloads_changed(0);
+	on_downloads_change(0);
 	refresh();
 
 	if (some_insufficient)
@@ -1665,10 +1749,19 @@ on_periodic(struct json_node *result, void *data)
 	result = json_next(result);
 	if (NULL != result) {
 		parse_downloads(result);
-		on_downloads_changed(1);
+		on_downloads_change(1);
 	}
 
 	refresh();
+}
+
+static void
+runaction_maychanged(struct aria_download *d)
+{
+	if (NULL != d) {
+		update_tags(d);
+		draw_main();
+	}
 }
 
 /* Returns:
@@ -1713,19 +1806,14 @@ runaction(struct aria_download *d, const char *name, ...)
 
 	refresh();
 
-	if (WIFEXITED(status) && 127 == WEXITSTATUS(status))
+	if (WIFEXITED(status) && 127 == WEXITSTATUS(status)) {
 		return -1;
-	else
-		return WIFEXITED(status) && EXIT_SUCCESS == WEXITSTATUS(status) ? 0 : 1;
-}
-
-void
-rpc_on_download_status_change(struct aria_download *d)
-{
-	(void)d;
-
-	on_downloads_changed(1);
-	refresh();
+	} else if (WIFEXITED(status) && EXIT_SUCCESS == WEXITSTATUS(status)) {
+		runaction_maychanged(d);
+		return EXIT_SUCCESS;
+	} else {
+		return EXIT_FAILURE;
+	}
 }
 
 static char *
@@ -1862,6 +1950,8 @@ parse_option(char const *option, char const *value, struct aria_download *d)
 			globalstat.download_speed_limit = atol(value);
 		else if (0 == strcmp("max-overall-upload-limit", option))
 			globalstat.upload_speed_limit = atol(value);
+		else if (0 == strcmp("dir", option))
+			is_local = 0 == access(value, R_OK | W_OK | X_OK);
 	}
 }
 
@@ -1875,6 +1965,16 @@ on_options(struct json_node *result, struct aria_download *d)
 
 	if (NULL != d)
 		unref_download(d);
+}
+
+static void
+update_options(struct aria_download *d, int user);
+
+static void
+on_options_change(struct json_node *result, struct aria_download *d)
+{
+	if (NULL != result)
+		update_options(d, 0);
 }
 
 static void
@@ -1914,6 +2014,8 @@ on_show_options(struct json_node *result, struct aria_download *d)
 	if (NULL == handler)
 		return;
 
+	handler->proc = on_options_change;
+	handler->data = NULL != d ? ref_download(d) : NULL;
 	json_write_int(jw, (int)(handler - rpc_handlers));
 
 	json_write_key(jw, "method");
@@ -1989,8 +2091,7 @@ update_options(struct aria_download *d, int user)
 	json_write_endarr(jw);
 
 	rpc_writer_epilog(handler);
-
-	update_delta(NULL != d ? 0 : 1);
+	/* update_delta(NULL != d ? 0 : 1); */
 }
 
 static void
@@ -2315,6 +2416,8 @@ update_all(void)
 		json_write_str(jw, "downloadSpeed");
 		/* json_write_str(jw, "seeder"); */
 		json_write_str(jw, "bittorrent");
+		if (is_local)
+			json_write_str(jw, "files");
 		json_write_endarr(jw);
 		/* }}} */
 		json_write_endarr(jw);
@@ -2333,10 +2436,14 @@ static void
 try_connect(void)
 {
 	assert(ws_fd < 0);
+	is_local = 0;
 	if (rpc_connect()) {
 		fds[1].fd = -1;
 		return;
 	}
+
+	/* update global options. mainly for test whether is_local */
+	update_options(NULL, 0);
 
 	fds[1].fd = ws_fd;
 	clear_last_error();
@@ -2429,7 +2536,7 @@ update_delta(int all)
 
 				json_write_str(jw, "bittorrent");
 				d->requested_bittorrent = 1;
-			} else if (NULL == d->name && 0 == d->num_files && d->status >= 0) {
+			} else if (0 == d->num_files && ((NULL == d->name && d->status >= 0) || is_local)) {
 				/* If “bittorrent.info.name” is empty then
 				 * assign the name of the first file as name.
 				 * */
@@ -2519,6 +2626,8 @@ writetemp(void)
 static void
 on_download_remove(struct json_node *result, void *data)
 {
+	(void)data;
+
 	if (NULL == result)
 		return;
 
@@ -2723,6 +2832,7 @@ stdin_read(void)
 			writetemp();
 			runaction(NULL, "%s", keyname(ch));
 			do_forced = 0;
+			refresh();
 			break;
 
 		}
