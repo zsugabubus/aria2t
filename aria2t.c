@@ -1694,9 +1694,6 @@ rpc_on_download_status_change(struct aria_download *d)
 {
 	(void)d;
 
-	if (DOWNLOAD_COMPLETE == abs(d->status)) {
-		runaction(d, "complete");
-	}
 	on_downloads_changed(1);
 	refresh();
 }
