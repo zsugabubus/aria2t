@@ -1360,20 +1360,27 @@ draw_peer(struct aria_download const *d, size_t i, int *y)
 {
 	struct aria_peer const *p = &d->peers[i];
 	char fmtbuf[5];
-	char szpercent[6];
-	char szpeerspeed[6];
+	int n;
 	int w = getmaxx(stdscr);
 	int ipw = w > (int)sizeof p->ip + 30 ? sizeof p->ip : 0;
-	int n;
-
-	szpercent[fmt_percent(szpercent, p->pieces_have, d->num_pieces)] = '\0';
-	szpeerspeed[fmt_speed(szpeerspeed, p->peer_download_speed)] = '\0';
 
 	attr_set(A_BOLD, 0, NULL);
 	mvprintw(*y, 0, "  %*.*s", ipw, ipw, p->ip);
 
 	attr_set(A_NORMAL, 0, NULL);
-	printw(":%-6u  %s @ %s  ", p->port, szpercent, szpeerspeed);
+	printw(":%-6u  ", p->port);
+
+	n = fmt_percent(fmtbuf, p->pieces_have, d->num_pieces);
+	addnstr(fmtbuf, n);
+
+	if (p->peer_download_speed > 0) {
+		addstr(" @ ");
+		n = fmt_speed(fmtbuf, p->peer_download_speed);
+		addnstr(fmtbuf, n);
+	} else {
+		addstr("   " "    ");
+	}
+	addstr("  ");
 
 	if (p->down_choked) {
 		addstr("----");
