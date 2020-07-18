@@ -95,7 +95,6 @@ struct aria_peer {
 
 	clock_t peer_measured_at;
 	uint32_t peer_download_speed;
-	uint32_t peer_upload_speed;
 
 	uint32_t download_speed;
 	uint32_t upload_speed;
@@ -696,7 +695,6 @@ parse_peers(struct aria_download *d, struct json_node *node)
 		}
 		/* new peer; already added to the list just initialize */
 		p->peer_download_speed = 0;
-		p->peer_upload_speed = 0;
 		p->peer_measured_at = now;
 		continue;
 
@@ -708,7 +706,6 @@ parse_peers(struct aria_download *d, struct json_node *node)
 			clock_t clocks_change = now - oldp->peer_measured_at;
 
 			p->peer_download_speed = (bytes_change * CLOCKS_PER_SEC) / clocks_change;
-			p->peer_upload_speed = (bytes_change * CLOCKS_PER_SEC) / clocks_change;
 			p->peer_measured_at = now;
 		} else {
 			/* nothing happened since then */
@@ -1339,10 +1336,48 @@ static void draw_main(void)
 }
 
 static void
-draw_peer(struct aria_peer const *p, size_t i, int *y)
+draw_peer(struct aria_download const *d, size_t i, int *y)
 {
-	mvaddstr(y, 4, p->peerid);
-	mvaddstr(y, 40, p->ip);
+	struct aria_peer const *p = &d->peers[i];
+	char fmtbuf[5];
+	char szpercent[6];
+	char szpeerspeed[6];
+	int w = getmaxx(stdscr);
+	int n;
+
+	szpercent[fmt_percent(szpercent, p->pieces_have, d->num_pieces)] = '\0';
+	szpeerspeed[fmt_speed(szpeerspeed, p->peer_download_speed)] = '\0';
+
+	attr_set(A_NORMAL, 0, NULL);
+	mvprintw(*y, 4, "[%*.s]:%u %s @ %s ",
+		w > (int)sizeof p->ip + 30 ? sizeof p->ip : 0, p->ip, p->port,
+		szpercent, szpeerspeed);
+
+	if (p->down_choked) {
+		addstr("----");
+	} else if (p->download_speed > 0) {
+		attr_set(A_BOLD, COLOR_DOWN, NULL);
+		n = fmt_speed(fmtbuf, p->download_speed);
+		addnstr(fmtbuf, n);
+		attr_set(A_NORMAL, 0, NULL);
+	} else {
+		addstr("    ");
+	}
+	addstr(" ");
+
+	if (p->up_choked) {
+		addstr("----");
+	} else if (p->upload_speed > 0) {
+		attr_set(A_BOLD, COLOR_UP, NULL);
+		n = fmt_speed(fmtbuf, p->upload_speed);
+		addnstr(fmtbuf, n);
+		attr_set(A_NORMAL, 0, NULL);
+	} else {
+		addstr("    ");
+	}
+	addstr("  ");
+	addstr(p->peerid);
+
 	++*y;
 }
 
