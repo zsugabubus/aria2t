@@ -602,7 +602,7 @@ parse_file_servers(struct aria_file *f, struct json_node *node)
 	node = json_children(node);
 	do {
 		struct json_node *field = json_children(node);
-		struct aria_uri *u;
+		struct aria_uri *u = u;
 		struct aria_server s;
 
 		do {
@@ -634,7 +634,7 @@ parse_peer(struct aria_peer *p, struct json_node *node)
 		if (0 == strcmp(field->key, "peerId"))
 			p->peerid = strdup(field->val.str);
 		else if (0 == strcmp(field->key, "ip"))
-			strncpy(p->ip, field->val.str, sizeof p->ip);
+			strncpy(p->ip, field->val.str, sizeof p->ip - 1);
 		else if (0 == strcmp(field->key, "port"))
 			p->port = strtoul(field->val.str, NULL, 10);
 		else if (0 == strcmp(field->key, "bitfield")) {
