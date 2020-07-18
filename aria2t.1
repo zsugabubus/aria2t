@@ -7,9 +7,9 @@ aria2t \- an aria2c terminal frontend
 
 .SH DESCRIPTION
 .B aria2t
-is a simple, low footprint frontend for aria2c(1).
-
-.SH KEYBOARD CONTROL
+is a low footprint terminal frontend for \fBaria2c\fR(1).
+.
+.SH USAGE
 .
 .TP
 .B k, UP
@@ -36,12 +36,8 @@ Select first.
 Select last.
 .
 .TP
-.B s, S
-Start (unpause) selected/all download(s).
-.
-.TP
-.B p, P
-Pause selected/all download(s).
+.B N
+Jump to download that selection follows.
 .
 .TP
 .B K
@@ -52,49 +48,70 @@ Move selected download forward in the queue.
 Move selected download backward in the queue.
 .
 .TP
-.B N
-Jump to download that selection follows.
+.B s, S
+Start (unpause) selected/all download(s).
+.
+.TP
+.B p, P
+Pause selected/all download(s).
 .
 .TP
 .B a, A, +
-Try running same-named action or open \fR$EDITOR\fR then add download(s) from file (one per line).
+Add download(s) from file (one per line). If there are no associated actions,
+opens \fBEDITOR\fR. Lastly added download gets selected. Lines that could not
+be added are get written back to the file.
 .sp
-Lines ending with \fB.torrent\fR, \fB.meta4\fR/\fB.metalink\fR are treated
+Lines ending with \fB.torrent\fR and \fB.meta4\fR or \fB.metalink\fR are treated
 like Torrent and Metalink files on the local filesystem. In every other
 case and if upload fails for some reason (e.g. file not readable or it is really just
-an URI that ends with one of these extensions) are treated like an URI.
+an URI that ends with one of these extensions) is treated like an URI.
 .sp
 Downloads inserted after the selection in the queue.
 .
 .TP
+.B i, I
+Show selected download/global options in a TAB-separated key-value format. If
+there are no associated actions, displays options using \fBPAGER\fR. To change
+an option edit the file.
+.
+.TP
 .B D, DEL
-Remove download then run action \*(lqD\*(rq.
+Remove download then run action \*(lqD\*(rq. (Can be used to implement a
+\*(lqremove with files\*(rq operation.)
 .
 .TP
 .B x, X
 Remove download result for selection/all downloads.
 .
 .TP
-.B i, I
-Try running same-named action or show selected download/global options in \fI$PAGER\fR. For changing an option
-edit the file. (For example with \fIless(1)\fR you can invoke \fI$EDITOR\fR
-by \fBv\fR.)
-.
-.TP
-.B CTRL-L
-Re-request all downloads. Tries reconnect if needed.
-.
-.TP
 .B v, V
 Switch to next/previous view.
+.sp
+The following views are available (in this order):
+.RS
+.IP \(bu
+Downloads (default). Shows downloads in an auto-ordered list: Topmost the queued
+and currently active ones; completed downloads and errors at the bottom;
+everything else is in-between.
+.IP \(bu
+Files. Shows files of a download, URIs of files and the servers used for downloading a
+URI. Starred URIs are the ones that were used for downloading. Dashed (\*(lq----\*(rq)
+progress means an unselected file.
+.IP \(bu
+Peers. Shows connected BitTorrent peers\*(Lp IP address, port number, (their) progress
+and download speed, speed information about how fast aria2c downloads and uploads
+from/to them, and finally the peer id. Dashed (\*(lq----\*(rq) slots means choking.
+.PP
+.RE
 .
 .TP
 .B !
-Do next command by force.
+Do next command by force. With Torrent downloads, for example, it means that it
+will not contant to tracker(s).
 .
 .TP
-.B Q
-Shutdown \fIaria2c\fR\&.
+.B RETURN
+If standard output is not connected to a terminal, print selected GID and exit.
 .
 .TP
 .B q
@@ -105,21 +122,37 @@ Go back to default view. On default view quit.
 Quit program.
 .
 .TP
-.B Return
-If standard output is not connected to a terminal, print selected GID and exit.
-.
-.TP
 .B Ctrl-C
 Quit program with failure.
 .
 .TP
+.B CTRL-L
+Reinitialize connection.
+.
+.TP
+.B Q
+Run action \*(lqQ\*(rq then shut down aria2.
+.
+.TP
 .R (everything else)
-Run action named like pressed key.
+Run action under \fB$ARIA2T_CONFIG/actions\fR named like the pressed
+key.
 .
-.SH ACTIONS
+.SS Session file
 .
-Actions are executable files under \*(lq\fB$ARIA2T_CONFIG\fR/actions\*(rq that
-you can invoke by pressing a key.
+A temporary file that used for communicating with the user and actions.
+.
+.SS Actions
+.
+Actions receive two arguments:
+.RS
+.IP \(bu
+Selected GID.
+.IP \(bu
+Path to the session file, filled with TAB-separated information about selection.
+.RE
+.PP
+If an action terminates with failure, in-progress operation is cancelled.
 .
 .SH ENVIRONMENT
 .
@@ -148,6 +181,10 @@ Default: (empty).
 Set configuration root directory.
 .sp
 Default: $HOME/.config/aria2t.
+.
+.TP
+.I TMP
+Where to create session file.
 .
 .SH EXAMPLE
 Connect to “127.0.0.1:16800” using “$$secret$$” token.
