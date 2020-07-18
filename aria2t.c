@@ -641,9 +641,9 @@ parse_peer(struct aria_peer *p, struct json_node *node)
 
 			p->pieces_have = pieces_have;
 		} else if (0 == strcmp(field->key, "amChoking"))
-			p->down_choked = 0 == strcmp(field->val.str, "true");
-		else if (0 == strcmp(field->key, "peerChoking"))
 			p->up_choked = 0 == strcmp(field->val.str, "true");
+		else if (0 == strcmp(field->key, "peerChoking"))
+			p->down_choked = 0 == strcmp(field->val.str, "true");
 		else if (0 == strcmp(field->key, "downloadSpeed"))
 			p->download_speed = strtoul(field->val.str, NULL, 10);
 		else if (0 == strcmp(field->key, "uploadSpeed"))
@@ -702,10 +702,10 @@ parse_peers(struct aria_download *d, struct json_node *node)
 		/* compute delta */
 		if (oldp->pieces_have < p->pieces_have) {
 			uint32_t pieces_change = p->pieces_have - oldp->pieces_have;
-			uint64_t bytes_change = pieces_change * d->piece_size;
+			uint64_t bytes_change = (uint64_t)pieces_change * (uint64_t)d->piece_size;
 			clock_t clocks_change = now - oldp->peer_measured_at;
 
-			p->peer_download_speed = (bytes_change * CLOCKS_PER_SEC) / clocks_change;
+			p->peer_download_speed = pieces_change;  /* (bytes_change * CLOCKS_PER_SEC) / clocks_change; */
 			p->peer_measured_at = now;
 		} else {
 			/* nothing happened since then */
@@ -1103,7 +1103,6 @@ parse_downloads(struct json_node *result, char oldview)
 
 			if (json_obj == json_type(result)) {
 				error_handler(result);
-				assert(0);
 				continue;
 			}
 			node = json_children(result);
@@ -1349,8 +1348,8 @@ draw_peer(struct aria_download const *d, size_t i, int *y)
 	szpeerspeed[fmt_speed(szpeerspeed, p->peer_download_speed)] = '\0';
 
 	attr_set(A_NORMAL, 0, NULL);
-	mvprintw(*y, 4, "[%*.s]:%u %s @ %s ",
-		w > (int)sizeof p->ip + 30 ? sizeof p->ip : 0, p->ip, p->port,
+	mvprintw(*y, 4, "[%s]:%u %s @ %s ",
+		/*w > (int)sizeof p->ip + 30 ? sizeof p->ip : 0,*/ p->ip, p->port,
 		szpercent, szpeerspeed);
 
 	if (p->down_choked) {
@@ -1643,7 +1642,7 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 		break;
 
 	case DOWNLOAD_ERROR: {
-		int usable_width = 28 + (NULL == d->tags ? tag_col_width : 0);
+		int usable_width = 29 + (NULL == d->tags ? tag_col_width : 0);
 		addstr("* ");
 		attr_set(A_BOLD, COLOR_ERR, NULL);
 		printw("%-*.*s", usable_width, usable_width, NULL != d->error_message && (strlen(d->error_message) <= 30 || view == VIEWS[1]) ? d->error_message : "");
@@ -1666,7 +1665,7 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 		goto print_files;
 
 	case DOWNLOAD_PAUSED:
-		addstr("| ");
+		addstr("|  ");
 		attr_set(A_NORMAL, 0, NULL);
 
 		n = fmt_space(fmtbuf, d->total);
@@ -1700,7 +1699,7 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 		break;
 
 	case DOWNLOAD_COMPLETE:
-		addstr("         ");
+		addstr("          ");
 
 		attr_set(A_NORMAL, 0, NULL);
 
@@ -1715,15 +1714,13 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 		break;
 
 	case DOWNLOAD_ACTIVE:
-		addstr("> ");
+		addstr(">  ");
 		attr_set(A_NORMAL, 0, NULL);
 
 		if (d->download_speed > 0) {
 			attr_set(A_BOLD, COLOR_DOWN, NULL);
 			n = fmt_percent(fmtbuf, d->have, d->total);
-			/* we can save one column because we know that percent
-			 * never will be longer than 100%. */
-			addnstr(fmtbuf + 1, n - 1);
+			addnstr(fmtbuf, n);
 
 			attr_set(A_NORMAL, 0, NULL);
 			addstr(" @ ");
@@ -3008,6 +3005,11 @@ writetemp(void)
 		return;
 
 	d = downloads[selidx];
+
+	/* BitTorren dir/name; it may be a directory for a multi or a file for
+	 * a single-file Torrent */
+	if (NULL != d->dir && NULL != d->name)
+		fprintf(f, "file\t%s/%s\n", d->dir, d->name);
 
 	if (NULL != d->files) {
 		for (i = 0; i < d->num_files; ++i)
