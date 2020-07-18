@@ -65,7 +65,8 @@ fmt_decimal(char *str, uint64_t n, char const *UNITS, uint64_t const *BASE) {
 		str[1] = n >= 10U  ? '0' + ((n % 100U) / 10U) : ' ';
 		str[2] = '0' + (n % 10U);
 	} else {
-		n /= BASE[2] / 10U;
+		n *= 10;
+		n /= BASE[2];
 		str[0] = '0' + (n / 10U);
 		str[1] = '.';
 		str[2] = '0' + (n % 10U);
