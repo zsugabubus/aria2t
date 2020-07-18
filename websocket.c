@@ -39,7 +39,7 @@ static int ws_http_upgrade(char const *host, in_port_t port);
 static void
 ws_strerror(void)
 {
-	free(last_error), last_error = strdup(strerror(errno));
+	free(error_message), error_message = strdup(strerror(errno));
 }
 
 int
@@ -59,7 +59,7 @@ ws_connect(char const *host, in_port_t port)
 	sprintf(port_str, "%hu", port);
 
 	if ((err = getaddrinfo(host, port_str, &hints, &addrs))) {
-		free(last_error), last_error = strdup("failed to resolve");
+		free(error_message), error_message = strdup("failed to resolve");
 		return 1;
 	}
 
@@ -93,12 +93,12 @@ ws_connect(char const *host, in_port_t port)
 	freeaddrinfo(addrs);
 
 	if (ws_fd == -1) {
-		free(last_error), last_error = strdup("failed to connect");
+		free(error_message), error_message = strdup("failed to connect");
 		return 1;
 	}
 
 	if (ws_http_upgrade(host, port)) {
-		free(last_error), last_error = strdup("connection refused");
+		free(error_message), error_message = strdup("connection refused");
 		return 1;
 	}
 

@@ -425,16 +425,16 @@ get_download_bygid(char const *gid)
 }
 
 static void
-clear_last_error(void)
+clear_error_message(void)
 {
-	free(last_error), last_error = NULL;
+	free(error_message), error_message = NULL;
 	draw_statusline();
 }
 
 static void
-set_last_error(char const *message)
+set_error_message(char const *message)
 {
-	free(last_error), last_error = strdup(message);
+	free(error_message), error_message = strdup(message);
 	draw_statusline();
 }
 
@@ -443,7 +443,7 @@ error_handler(struct json_node *error)
 {
 	struct json_node const *message = json_get(error, "message");
 
-	set_last_error(message->val.str);
+	set_error_message(message->val.str);
 	refresh();
 }
 
@@ -1642,19 +1642,8 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 
 	(void)root;
 
-	if (num_downloads < 10)
-		n = 2;
-	else if (num_downloads < 100)
-		n = 3;
-	else if (num_downloads < 1000)
-		n = 4;
-	else if (num_downloads < 10000)
-		n = 5;
-	else
-		n = 7;
-
 	attr_set(A_NORMAL, 0, NULL);
-	mvaddnstr(*y, 0, d->gid, n);
+	mvaddstr(*y, 0, d->gid);
 	addstr(" ");
 	{
 		/* struct aria_download *child = d; */
@@ -1998,10 +1987,10 @@ draw_statusline(void)
 			remote_host, remote_port,
 			ws_fd >= 0 ? "" : " (not connected)");
 
-	if (NULL != last_error) {
+	if (NULL != error_message) {
 		addstr(": ");
 		attr_set(A_BOLD, COLOR_ERR, NULL);
-		addstr(last_error);
+		addstr(error_message);
 		attr_set(A_NORMAL, 0, NULL);
 	}
 
@@ -2361,7 +2350,7 @@ static void
 on_options(struct json_node *result, struct aria_download *d)
 {
 	if (NULL != result) {
-		clear_last_error();
+		clear_error_message();
 		parse_options(result, parse_option, d);
 	}
 
@@ -2388,15 +2377,16 @@ on_show_options(struct json_node *result, struct aria_download *d)
 	size_t linesiz;
 	struct rpc_request *req;
 	int action;
+	struct stat stbefore, stafter;
 
 	if (NULL == result)
 		goto out;
 
-	clear_last_error();
-	/* FIXME: error handling */
+	clear_error_message();
 
 	if (NULL == (f = fopen(tempfile, "w")))
-		return;
+		goto out;
+	(void)fstat(fileno(f), &stbefore);
 
 	parse_options(result, write_option, f);
 	parse_options(result, parse_option, d);
@@ -2407,14 +2397,19 @@ on_show_options(struct json_node *result, struct aria_download *d)
 		action = fileout(0);
 
 	if (EXIT_SUCCESS != action)
-		return;
+		goto out;
 
 	if (NULL == (f = fopen(tempfile, "r")))
-		return;
+		goto out;
+	(void)fstat(fileno(f), &stafter);
+
+	/* not modified */
+	if (stbefore.st_mtim.tv_sec == stafter.st_mtim.tv_sec)
+		goto out_fclose;
 
 	req = rpc_new();
 	if (NULL == req)
-		return;
+		goto out_fclose;
 
 	req->handler = on_options_change;
 	req->arg = NULL != d ? ref_download(d) : NULL;
@@ -2458,9 +2453,11 @@ on_show_options(struct json_node *result, struct aria_download *d)
 	json_write_endarr(jw);
 
 	free(line);
-	fclose(f);
 
 	rpc_send(req);
+
+out_fclose:
+	fclose(f);
 
 out:
 	if (NULL != d)
@@ -2607,18 +2604,21 @@ add_downloads(char cmd)
 	if (EXIT_SUCCESS != action)
 		return;
 
-	clear_last_error();
+	clear_error_message();
 
 	/* FIXME: error handling */
-	if (NULL == (f = fopen(tempfile, "r"))) {
+	if (NULL == (f = fopen(tempfile, "r")))
 		return;
-	}
 
 	req = rpc_new();
 	if (NULL == req)
-		return;
+		goto out_fclose;
 
 	arg = malloc(sizeof *arg);
+	if (NULL == arg) {
+		req->handler = NULL;
+		goto out_fclose;
+	}
 
 	req->handler = on_downloads_add;
 
@@ -2727,7 +2727,6 @@ add_downloads(char cmd)
 	}
 
 	free(line);
-	fclose(f);
 
 	json_write_endarr(jw); /* }}} */
 	json_write_endarr(jw);
@@ -2735,6 +2734,9 @@ add_downloads(char cmd)
 	req->arg = arg;
 
 	rpc_send(req);
+
+out_fclose:
+	fclose(f);
 }
 
 static void
@@ -2842,7 +2844,7 @@ try_connect(void)
 	update_options(NULL, 0);
 
 	fds[1].fd = ws_fd;
-	clear_last_error();
+	clear_error_message();
 
 	if (tempfile[0])
 		unlink(tempfile);
@@ -3307,7 +3309,8 @@ fill_pairs(void)
 	}
 }
 
-int main(int argc, char *argv[])
+int
+main(int argc, char *argv[])
 {
 	sigset_t sigmask;
 
