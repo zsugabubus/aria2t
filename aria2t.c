@@ -3103,6 +3103,7 @@ stdin_read(void)
 				oldselidx = -1; /* force redraw */
 			}
 
+			update_delta(1);
 			draw_all();
 			refresh();
 			break;
@@ -3113,6 +3114,7 @@ stdin_read(void)
 				oldselidx = -1; /* force redraw */
 			}
 
+			update_delta(1);
 			draw_all();
 			refresh();
 			break;
