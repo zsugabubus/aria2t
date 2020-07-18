@@ -93,7 +93,7 @@ struct aria_peer {
 
 	uint32_t pieces_have;
 
-	clock_t peer_measured_at;
+	struct timespec peer_measured_at;
 	uint32_t peer_download_speed;
 
 	uint32_t download_speed;
@@ -657,7 +657,7 @@ parse_peers(struct aria_download *d, struct json_node *node)
 	void *p;
 	uint32_t i;
 	uint32_t num_oldpeers;
-	clock_t now;
+	struct timespec now;
 	struct aria_peer *oldpeers;
 
 	num_oldpeers = d->num_peers;
@@ -672,7 +672,14 @@ parse_peers(struct aria_download *d, struct json_node *node)
 	if (json_isempty(node))
 		goto free_oldpeers;
 
-	now = clock();
+	clock_gettime(
+#ifdef CLOCK_MONOTONIC_COARSE
+		CLOCK_MONOTONIC_COARSE,
+#else
+		CLOCK_MONOTONIC,
+#endif
+		&now
+	);
 
 	i = 0;
 	node = json_children(node);
@@ -701,14 +708,19 @@ parse_peers(struct aria_download *d, struct json_node *node)
 	found_oldpeer:
 		/* compute delta */
 		if (oldp->pieces_have < p->pieces_have) {
-			uint32_t pieces_change = p->pieces_have - oldp->pieces_have;
-			uint64_t bytes_change = (uint64_t)pieces_change * (uint64_t)d->piece_size;
-			clock_t clocks_change = now - oldp->peer_measured_at;
+#define NS_PER_SEC UINT64_C(1000000000)
+			uint64_t pieces_change = p->pieces_have - oldp->pieces_have;
+			uint64_t bytes_change = pieces_change * d->piece_size;
+			uint64_t ns_change =
+				(now.tv_sec - oldp->peer_measured_at.tv_sec) * NS_PER_SEC +
+				now.tv_nsec - oldp->peer_measured_at.tv_nsec;
 
-			p->peer_download_speed = pieces_change;  /* (bytes_change * CLOCKS_PER_SEC) / clocks_change; */
+			p->peer_download_speed = (bytes_change * NS_PER_SEC) / ns_change;
 			p->peer_measured_at = now;
+#undef NS_PER_SEC
 		} else {
 			/* nothing happened since then */
+			p->peer_download_speed = oldp->peer_download_speed;
 			p->peer_measured_at = oldp->peer_measured_at;
 		}
 
@@ -1342,15 +1354,17 @@ draw_peer(struct aria_download const *d, size_t i, int *y)
 	char szpercent[6];
 	char szpeerspeed[6];
 	int w = getmaxx(stdscr);
+	int ipw = w > (int)sizeof p->ip + 30 ? sizeof p->ip : 0;
 	int n;
 
 	szpercent[fmt_percent(szpercent, p->pieces_have, d->num_pieces)] = '\0';
 	szpeerspeed[fmt_speed(szpeerspeed, p->peer_download_speed)] = '\0';
 
+	attr_set(A_BOLD, 0, NULL);
+	mvprintw(*y, 4, "%*.*s", ipw, ipw, p->ip);
+
 	attr_set(A_NORMAL, 0, NULL);
-	mvprintw(*y, 4, "[%s]:%u %s @ %s ",
-		/*w > (int)sizeof p->ip + 30 ? sizeof p->ip : 0,*/ p->ip, p->port,
-		szpercent, szpeerspeed);
+	printw(":%u  %s @ %s  ", p->port, szpercent, szpeerspeed);
 
 	if (p->down_choked) {
 		addstr("----");
