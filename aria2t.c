@@ -703,8 +703,8 @@ parse_peers(struct aria_download *d, struct json_node *node)
 		 * its progress/speed change */
 		for (j = 0; j < num_oldpeers; ++j) {
 			oldp = &oldpeers[j];
-			if (oldp->port == p->port &&
-			    0 == strcmp(oldp->ip, p->ip) &&
+			if (/*oldp->port == p->port &&
+			    0 == strcmp(oldp->ip, p->ip) &&*/
 			    0 == strcmp(oldp->peerid, p->peerid)) {
 				goto found_oldpeer;
 			}
@@ -1373,7 +1373,7 @@ draw_peer(struct aria_download const *d, size_t i, int *y)
 	mvprintw(*y, 0, "  %*.*s", ipw, ipw, p->ip);
 
 	attr_set(A_NORMAL, 0, NULL);
-	printw(":%u  %s @ %s  ", p->port, szpercent, szpeerspeed);
+	printw(":%-6u  %s @ %s  ", p->port, szpercent, szpeerspeed);
 
 	if (p->down_choked) {
 		addstr("----");
@@ -1737,7 +1737,7 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 		break;
 
 	case DOWNLOAD_ACTIVE:
-		addstr(">  ");
+		addstr("> ");
 		attr_set(A_NORMAL, 0, NULL);
 
 		if (d->download_speed > 0) {
@@ -1753,6 +1753,7 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 			addnstr(fmtbuf, n);
 			addstr(" ");
 		} else {
+			addstr(" ");
 			n = fmt_space(fmtbuf, d->total);
 			addnstr(fmtbuf, n);
 
