@@ -671,7 +671,7 @@ parse_peers(struct aria_download *d, struct json_node *node)
 	d->peers = p;
 
 	if (json_isempty(node))
-		return;
+		goto free_oldpeers;
 
 	now = clock();
 
@@ -684,6 +684,8 @@ parse_peers(struct aria_download *d, struct json_node *node)
 
 		parse_peer((p = &d->peers[i]), node);
 
+		/* find new peer among previous ones to being able to compute
+		 * its progress/speed change */
 		for (j = 0; j < num_oldpeers; ++j) {
 			oldp = &oldpeers[j];
 			if (oldp->port == p->port &&
@@ -715,6 +717,7 @@ parse_peers(struct aria_download *d, struct json_node *node)
 
 	} while (++i, NULL != (node = json_next(node)));
 
+free_oldpeers:
 	free_peers(oldpeers, num_oldpeers);
 }
 
@@ -1024,6 +1027,34 @@ download_insufficient(struct aria_download *d)
 }
 
 static void
+parse_option(char const *option, char const *value, struct aria_download *d)
+{
+	if (NULL != d) {
+		if (0 == strcmp("max-download-limit", option))
+			d->download_speed_limit = atol(value);
+		else if (0 == strcmp("max-upload-limit", option))
+			d->upload_speed_limit = atol(value);
+		else if (0 == strcmp("dir", option)) {
+			free(d->dir), d->dir = strdup(value);
+			update_tags(d);
+		}
+	} else {
+		if (0 == strcmp("max-concurrent-downloads", option))
+			globalstat.max_concurrency = atol(value);
+		else if (0 == strcmp("save-session", option))
+			globalstat.save_session = 0 == strcmp(value, "true");
+		else if (0 == strcmp("optimize-concurrent-downloads", option))
+			globalstat.optimize_concurrency = 0 == strcmp(value, "true");
+		else if (0 == strcmp("max-overall-download-limit", option))
+			globalstat.download_speed_limit = atol(value);
+		else if (0 == strcmp("max-overall-upload-limit", option))
+			globalstat.upload_speed_limit = atol(value);
+		else if (0 == strcmp("dir", option))
+			is_local = 0 == access(value, R_OK | W_OK | X_OK);
+	}
+}
+
+static void
 parse_downloads(struct json_node *result, char oldview)
 {
 	int some_insufficient = 0; /* FIXME? it can cause an infinity loop */
@@ -1047,33 +1078,35 @@ parse_downloads(struct json_node *result, char oldview)
 
 		node = json_children(result);
 
-		if (NULL != (dd = get_download_bygid(json_get(node, "gid")->val.str))) {
-			d = *dd;
-
-			oldname = d->name;
-			/* these fields are not included in response if not
-			 * applicable, so we do a self reference loop to
-			 * indicate that we do not need to request these next
-			 * time */
-			if (NULL == d->belongs_to)
-				d->belongs_to = d;
-			if (NULL == d->following)
-				d->following = d;
-
-			parse_download(d, node);
-			some_insufficient |= download_insufficient(d);
-		} else
+		if (NULL == (dd = get_download_bygid(json_get(node, "gid")->val.str)))
 			/* we may skip the next get{Serv,Pe}ers response but
 			 * cannot do anything against it because we do not have
 			 * a download to decide its kind */
 			continue;
 
+		d = *dd;
+
+		oldname = d->name;
+		/* these fields are not included in response if not
+		 * applicable, so we do a self reference loop to
+		 * indicate that we do not need to request these next
+		 * time */
+		if (NULL == d->belongs_to)
+			d->belongs_to = d;
+		if (NULL == d->following)
+			d->following = d;
+
+		parse_download(d, node);
+		some_insufficient |= download_insufficient(d);
+
+		/* handle getPeers/getServers */
 		if (NULL != oldname ? 'p' == oldview : 'f' == oldview) {
 			result = json_next(result);
 			assert(result);
 
 			if (json_obj == json_type(result)) {
 				error_handler(result);
+				assert(0);
 				continue;
 			}
 			node = json_children(result);
@@ -1083,6 +1116,13 @@ parse_downloads(struct json_node *result, char oldview)
 				(NULL != oldname ? parse_peers : parse_servers)(d, node);
 		}
 
+		/* handle getOption */
+		if (NULL == d->dir) {
+			result = json_next(result);
+			assert(result);
+			node = json_children(result);
+			parse_options(node, parse_option, d);
+		}
 	}
 
 	if (some_insufficient)
@@ -1302,6 +1342,7 @@ static void
 draw_peer(struct aria_peer const *p, size_t i, int *y)
 {
 	mvaddstr(y, 4, p->peerid);
+	mvaddstr(y, 40, p->ip);
 	++*y;
 }
 
@@ -2251,34 +2292,6 @@ write_option(char const *option, char const *value, FILE *file)
 }
 
 static void
-parse_option(char const *option, char const *value, struct aria_download *d)
-{
-	if (NULL != d) {
-		if (0 == strcmp("max-download-limit", option))
-			d->download_speed_limit = atol(value);
-		else if (0 == strcmp("max-upload-limit", option))
-			d->upload_speed_limit = atol(value);
-		else if (0 == strcmp("dir", option)) {
-			free(d->dir), d->dir = strdup(value);
-			update_tags(d);
-		}
-	} else {
-		if (0 == strcmp("max-concurrent-downloads", option))
-			globalstat.max_concurrency = atol(value);
-		else if (0 == strcmp("save-session", option))
-			globalstat.save_session = 0 == strcmp(value, "true");
-		else if (0 == strcmp("optimize-concurrent-downloads", option))
-			globalstat.optimize_concurrency = 0 == strcmp(value, "true");
-		else if (0 == strcmp("max-overall-download-limit", option))
-			globalstat.download_speed_limit = atol(value);
-		else if (0 == strcmp("max-overall-upload-limit", option))
-			globalstat.upload_speed_limit = atol(value);
-		else if (0 == strcmp("dir", option))
-			is_local = 0 == access(value, R_OK | W_OK | X_OK);
-	}
-}
-
-static void
 on_options(struct json_node *result, struct aria_download *d)
 {
 	if (NULL != result) {
@@ -2912,6 +2925,20 @@ update_delta(int all)
 				json_write_beginobj(jw);
 				json_write_key(jw, "methodName");
 				json_write_str(jw, NULL != d->name ? "aria2.getPeers" : "aria2.getServers");
+				json_write_key(jw, "params");
+				json_write_beginarr(jw);
+				/* “secret” */
+				json_write_str(jw, secret_token);
+				/* “gid” */
+				json_write_str(jw, d->gid);
+				json_write_endarr(jw);
+				json_write_endobj(jw);
+			}
+
+			if (NULL == d->dir) {
+				json_write_beginobj(jw);
+				json_write_key(jw, "methodName");
+				json_write_str(jw, "aria2.getOption");
 				json_write_key(jw, "params");
 				json_write_beginarr(jw);
 				/* “secret” */
