@@ -22,6 +22,7 @@
 #include <netinet/in.h>
 #include <sys/types.h>
 #include <sys/xattr.h>
+#include <time.h>
 
 #include "websocket.h"
 #include "jeezson/jeezson.h"
@@ -46,7 +47,6 @@ static int oldselidx = 0;
 static int selidx = 0;
 static int topidx = 0;
 
-
 static int is_local = 0; /* server runs on local host */
 static int downloads_need_reflow = 0;
 static int tag_col_width = 0;
@@ -70,7 +70,7 @@ static struct pollfd fds[
 #define CONTROL(letter) ((letter) - '@')
 #define ARRAY_LEN(arr) (sizeof arr / sizeof *arr)
 
-#define VIEWS "\0af"
+#define VIEWS "\0dfp"
 static char view = VIEWS[1];
 
 /* NOTE: order is relevant for sorting */
@@ -82,16 +82,41 @@ static char view = VIEWS[1];
 #define DOWNLOAD_REMOVED  5
 #define DOWNLOAD_ERROR    6
 
+struct aria_peer {
+	char *peerid;
+
+	char ip[INET6_ADDRSTRLEN];
+	in_port_t port;
+
+	unsigned up_choked: 1;
+	unsigned down_choked: 1;
+
+	uint32_t pieces_have;
+
+	clock_t peer_measured_at;
+	uint32_t peer_download_speed;
+	uint32_t peer_upload_speed;
+
+	uint32_t download_speed;
+	uint32_t upload_speed;
+};
+
+struct aria_server {
+	char *current_uri;
+	uint32_t download_speed;
+
+};
 enum aria_uri_status {
-	aria_uri_status_unknown,
-	aria_uri_status_used,
 	aria_uri_status_waiting,
+	aria_uri_status_used,
 	aria_uri_status_count
 };
 
 struct aria_uri {
 	enum aria_uri_status status;
+	uint32_t num_servers;
 	char *uri;
+	struct aria_server *servers;
 };
 
 struct aria_file {
@@ -101,19 +126,6 @@ struct aria_file {
 	unsigned selected: 1;
 	uint32_t num_uris;
 	struct aria_uri *uris;
-};
-
-struct aria_peer {
-	char *id;
-	char *ip_addr;
-	uint16_t port;
-
-	/* char *progress; */
-
-	int rx_choked;
-	int tx_choked;
-	uint32_t download_speed;
-	uint32_t upload_speed;
 };
 
 struct aria_download {
@@ -126,28 +138,32 @@ struct aria_download {
 	unsigned requested_bittorrent: 1;
 	/* DOWNLOAD_*; or negative if changed. */
 	int8_t status;
-	uint32_t queue_index;
+	uint16_t queue_index;
 
 	char *error_message;
 
 	uint32_t num_files;
 	uint32_t num_selfiles;
-	/* uint32_t num_pieces;
-	uint32_t piece_size; */
 
-	uint32_t num_seeders;
+	/* uint32_t num_seeders; */
 	uint32_t num_connections;
+
+	uint32_t num_peers;
+	uint32_t num_pieces;
+	uint32_t piece_size;
 
 	uint64_t total;
 	uint64_t have;
 	uint64_t uploaded;
-	/* char *progress; */
 
 	uint32_t download_speed;
 	uint32_t upload_speed;
 	uint32_t download_speed_limit;
 	uint32_t upload_speed_limit;
 
+	char *dir;
+
+	struct aria_peer *peers;
 	struct aria_file *files;
 	struct aria_download *belongs_to;
 	struct aria_download *following;
@@ -162,28 +178,59 @@ static void draw_files(void);
 static void draw_peers(void);
 static void draw_downloads(void);
 static void draw_download(struct aria_download const *d, struct aria_download const *root, int *y);
-static void draw_cursor(void);
+
+static void
+free_peer(struct aria_peer *p)
+{
+	free(p->peerid);
+}
+
+static void
+free_server(struct aria_server *s)
+{
+	free(s->current_uri);
+}
 
 static void
 free_uri(struct aria_uri *u)
 {
 	free(u->uri);
+
+	if (NULL != u->servers) {
+		uint32_t i;
+		for (i = 0; i < u->num_servers; ++i)
+			free_server(&u->servers[i]);
+		free(u->servers);
+	}
 }
 
 static void
 free_file(struct aria_file *f)
 {
-	uint32_t i;
-
-	if (NULL != f->uris)
+	if (NULL != f->uris) {
+		uint32_t i;
 		for (i = 0; i < f->num_uris; ++i)
 			free_uri(&f->uris[i]);
+		free(f->uris);
+	}
 
 	free(f->path);
 }
 
 static void
-free_download_files(struct aria_download *d)
+free_peers(struct aria_peer *peers, uint32_t num_peers)
+{
+	uint32_t i;
+
+	if (NULL == peers)
+		return;
+
+	for (i = 0; i < num_peers; ++i)
+		free_peer(&peers[i]);
+}
+
+static void
+free_files_of(struct aria_download *d)
 {
 	uint32_t i;
 
@@ -197,7 +244,13 @@ free_download_files(struct aria_download *d)
 static void
 free_download(struct aria_download *d)
 {
-	free_download_files(d);
+	free_files_of(d);
+	free(d->files);
+
+	free_peers(d->peers, d->num_peers);
+	free(d->peers);
+
+	free(d->dir);
 	free(d->name);
 	free(d->error_message);
 	free(d->tags);
@@ -252,15 +305,10 @@ int rpc_load_cfg(void);
 int rpc_connect(void);
 int rpc_shutdown(void);
 
-typedef void(*rpc_handler)(struct json_node *result, void *data);
-
-struct rpc_handler {
-	rpc_handler proc;
-	void *data;
+struct rpc_request {
+	void(*handler)(struct json_node *result, void *arg);
+	void *arg;
 };
-
-void rpc_writer_epilog(struct rpc_handler *handler);
-struct rpc_handler *rpc_writer_prolog(void);
 
 static struct aria_globalstat globalstat;
 
@@ -270,15 +318,15 @@ static in_port_t remote_port;
 
 static struct json_writer jw[1];
 
-static struct rpc_handler rpc_handlers[10];
+static struct rpc_request rpc_requests[10];
 
 static void
 on_notification(char const *method, struct json_node *event);
 
 static void
-default_handler(struct json_node *result, void *data)
+default_handler(struct json_node *result, void *arg)
 {
-	(void)result, (void)data;
+	(void)result, (void)arg;
 	/* just do nothing */
 }
 
@@ -341,15 +389,15 @@ new_download(void)
 	return d;
 }
 
-static struct rpc_handler *
-rpc_handler_alloc(void)
+static struct rpc_request *
+rpc_request_alloc(void)
 {
-	size_t n = ARRAY_LEN(rpc_handlers);
+	size_t n = ARRAY_LEN(rpc_requests);
 
 	while (n > 0) {
-		if (NULL == rpc_handlers[--n].proc) {
-			rpc_handlers[n].proc = default_handler;
-			return &rpc_handlers[n];
+		if (NULL == rpc_requests[--n].handler) {
+			rpc_requests[n].handler = default_handler;
+			return &rpc_requests[n];
 		}
 	}
 
@@ -415,7 +463,7 @@ on_ws_message(char *msg, size_t msglen)
 
 	if (NULL != (id = json_get(nodes, "id"))) {
 		struct json_node *const result = json_get(nodes, "result");
-		struct rpc_handler *const handler = &rpc_handlers[(unsigned)id->val.num];
+		struct rpc_request *const req = &rpc_requests[(unsigned)id->val.num];
 
 		if (NULL == result)
 			error_handler(json_get(nodes, "error"));
@@ -425,9 +473,9 @@ on_ws_message(char *msg, size_t msglen)
 		 * contains id=null, so we cannot get back the handler. the
 		 * best we can do is to ignore and may leak a resource inside
 		 * data. */
-		if (NULL != handler->proc) {
-			handler->proc(result, handler->data);
-			handler->proc = NULL;
+		if (NULL != req->handler) {
+			req->handler(result, req->arg);
+			req->handler = NULL;
 		}
 
 	} else if (NULL != (method = json_get(nodes, "method"))) {
@@ -443,54 +491,62 @@ on_ws_message(char *msg, size_t msglen)
 	return 0;
 }
 
-struct rpc_handler *
-rpc_writer_prolog(void)
+static struct rpc_request *
+rpc_new(void)
 {
+	struct rpc_request *req = rpc_request_alloc();
+
+	if (NULL == req)
+		return NULL;
+
+	json_writer_empty(jw);
 	json_write_beginobj(jw);
 
 	json_write_key(jw, "jsonrpc");
 	json_write_str(jw, "2.0");
 
 	json_write_key(jw, "id");
-	return rpc_handler_alloc();
+	json_write_int(jw, (int)(req - rpc_requests));
+
+	return req;
 }
 
-void
-rpc_writer_epilog(struct rpc_handler *handler)
+static void
+rpc_send(struct rpc_request *req)
 {
 	json_write_endobj(jw);
 
 	if (ws_write(jw->buf, jw->len)) {
-		assert(0);
-		handler->proc = NULL;
+		req->handler(NULL, req->arg);
+		req->handler = NULL;
 	}
-
-	json_writer_empty(jw);
 }
 
 static void
 update_tags(struct aria_download *d)
 {
-	char const *path;
 	ssize_t siz;
 	char *p;
 
-	/* no files to read from */
-	if (0 == d->num_files)
-		goto no_tags;
-
-	/* not downloaded yet */
-	if (NULL == (path = d->files[0].path))
-		goto no_tags;
-
 	if (NULL == d->tags)
-		d->tags = malloc(256);
+		d->tags = malloc(255 + 1);
 	if (NULL == d->tags)
 		goto no_tags;
 
-	if (-1 == (siz = getxattr(path, XATTR_NAME, d->tags, 255)))
-		goto no_tags;
+	if (NULL != d->dir && NULL != d->name) {
+		char pathbuf[PATH_MAX];
+		snprintf(pathbuf, sizeof pathbuf, "%s/%s", d->dir, d->name);
+		if (0 < (siz = getxattr(pathbuf, XATTR_NAME, d->tags, 255)))
+			goto has_tags;
+	}
 
+	if (0 < d->num_files && NULL != d->files[0].path)
+		if (0 < (siz = getxattr(d->files[0].path, XATTR_NAME, d->tags, 255)))
+			goto has_tags;
+
+	goto no_tags;
+
+has_tags:
 	is_local = 1;
 
 	d->tags[siz] = '\0';
@@ -504,12 +560,224 @@ no_tags:
 	free(d->tags), d->tags = NULL;
 }
 
+static struct aria_uri *
+file_finduri(struct aria_file const *f, char const*uri)
+{
+	uint32_t i;
+
+	for (i = 0; i < f->num_uris; ++i) {
+		struct aria_uri *u = &f->uris[i];
+		if (0 == strcmp(u->uri, uri))
+			return u;
+	}
+
+	return NULL;
+}
+
+static void
+uri_addserver(struct aria_uri *u, struct aria_server *s)
+{
+	void *p;
+
+	p = realloc(u->servers, (u->num_servers + 1) * sizeof *(u->servers));
+	if (NULL == p)
+		return;
+	(u->servers = p)[u->num_servers++] = *s;
+}
+
+static void
+parse_file_servers(struct aria_file *f, struct json_node *node)
+{
+	if (json_isempty(node))
+		return;
+
+	node = json_children(node);
+	do {
+		struct json_node *field = json_children(node);
+		struct aria_uri *u;
+		struct aria_server s;
+
+		do {
+			if (0 == strcmp(field->key, "uri")) {
+				u = file_finduri(f, field->val.str);
+				assert(NULL != u);
+			} else if (0 == strcmp(field->key, "downloadSpeed"))
+				s.download_speed = strtoul(field->val.str, NULL, 10);
+			else if (0 == strcmp(field->key, "currentUri"))
+				s.current_uri = field->val.str;
+			else
+				assert(!"unknown key in getServers([])");
+		} while (NULL != (field = json_next(field)));
+
+		if (0 == strcmp(u->uri, s.current_uri))
+			s.current_uri = NULL;
+		if (NULL != s.current_uri)
+			s.current_uri = strdup(s.current_uri);
+
+		uri_addserver(u, &s);
+	} while (NULL != (node = json_next(node)));
+}
+
+static void
+parse_peer(struct aria_peer *p, struct json_node *node)
+{
+	struct json_node *field = json_children(node);
+	do {
+		if (0 == strcmp(field->key, "peerId"))
+			p->peerid = strdup(field->val.str);
+		else if (0 == strcmp(field->key, "ip"))
+			strncpy(p->ip, field->val.str, sizeof p->ip);
+		else if (0 == strcmp(field->key, "port"))
+			p->port = strtoul(field->val.str, NULL, 10);
+		else if (0 == strcmp(field->key, "bitfield")) {
+			static uint8_t const HEX_POPCOUNT[] = {
+				0, 1, 1, 2, 1, 2, 2, 3,
+				1, 2, 2, 3, 2, 3, 3, 4,
+			};
+			uint32_t pieces_have = 0;
+			char *hex;
+
+			for (hex = field->val.str; '\0' != *hex; ++hex)
+				pieces_have += HEX_POPCOUNT[*hex <= '9' ? *hex - '0' : *hex - 'a' + 10];
+
+			p->pieces_have = pieces_have;
+		} else if (0 == strcmp(field->key, "amChoking"))
+			p->down_choked = 0 == strcmp(field->val.str, "true");
+		else if (0 == strcmp(field->key, "peerChoking"))
+			p->up_choked = 0 == strcmp(field->val.str, "true");
+		else if (0 == strcmp(field->key, "downloadSpeed"))
+			p->download_speed = strtoul(field->val.str, NULL, 10);
+		else if (0 == strcmp(field->key, "uploadSpeed"))
+			p->upload_speed = strtoul(field->val.str, NULL, 10);
+	} while (NULL != (field = json_next(field)));
+}
+
+static void
+parse_peers(struct aria_download *d, struct json_node *node)
+{
+	void *p;
+	uint32_t i;
+	uint32_t num_oldpeers;
+	clock_t now;
+	struct aria_peer *oldpeers;
+
+	num_oldpeers = d->num_peers;
+	d->num_peers = json_len(node);
+	if (NULL == (p = malloc(d->num_peers * sizeof *(d->peers)))) {
+		free(d->peers), d->peers = NULL;
+		return;
+	}
+	oldpeers = d->peers;
+	d->peers = p;
+
+	if (json_isempty(node))
+		return;
+
+	now = clock();
+
+	i = 0;
+	node = json_children(node);
+	do {
+		struct aria_peer *p;
+		struct aria_peer *oldp;
+		uint32_t j;
+
+		parse_peer((p = &d->peers[i]), node);
+
+		for (j = 0; j < num_oldpeers; ++j) {
+			oldp = &oldpeers[j];
+			if (oldp->port == p->port &&
+			    0 == strcmp(oldp->ip, p->ip) &&
+			    0 == strcmp(oldp->peerid, p->peerid)) {
+				goto found_oldpeer;
+			}
+		}
+		/* new peer; already added to the list just initialize */
+		p->peer_download_speed = 0;
+		p->peer_upload_speed = 0;
+		p->peer_measured_at = now;
+		continue;
+
+	found_oldpeer:
+		/* compute delta */
+		if (oldp->pieces_have < p->pieces_have) {
+			uint32_t pieces_change = p->pieces_have - oldp->pieces_have;
+			uint64_t bytes_change = pieces_change * d->piece_size;
+			clock_t clocks_change = now - oldp->peer_measured_at;
+
+			p->peer_download_speed = (bytes_change * CLOCKS_PER_SEC) / clocks_change;
+			p->peer_upload_speed = (bytes_change * CLOCKS_PER_SEC) / clocks_change;
+			p->peer_measured_at = now;
+		} else {
+			/* nothing happened since then */
+			p->peer_measured_at = oldp->peer_measured_at;
+		}
+
+	} while (++i, NULL != (node = json_next(node)));
+
+	free_peers(oldpeers, num_oldpeers);
+}
+
+static void
+parse_servers(struct aria_download *d, struct json_node *node)
+{
+	uint32_t i;
+
+	if (NULL == d->files)
+		return;
+
+	/* reset servers for every uri */
+	for (i = 0; i < d->num_files; ++i) {
+		struct aria_file *f = &d->files[i];
+		uint32_t j;
+
+		for (j = 0; j < f->num_uris; ++j) {
+			struct aria_uri *u = &f->uris[j];
+			u->num_servers = 0;
+		}
+	}
+
+	if (!json_isempty(node)) {
+		node = json_children(node);
+		do {
+			struct json_node *field = json_children(node);
+			struct json_node *servers = servers;
+			uint32_t fileidx = fileidx;
+
+			do {
+				if (0 == strcmp(field->key, "index"))
+					fileidx = atoi(field->val.str) - 1;
+				else if (0 == strcmp(field->key, "servers"))
+					servers = field;
+				else
+					assert(!"unknown key in getServers()");
+			} while (NULL != (field = json_next(field)));
+
+			assert(fileidx < d->num_files);
+			parse_file_servers(&d->files[fileidx], servers);
+		} while (NULL != (node = json_next(node)));
+	}
+
+	/* now deallocate server lists where num_servers == 0 */
+	for (i = 0; i < d->num_files; ++i) {
+		struct aria_file *f = &d->files[i];
+		uint32_t j;
+
+		for (j = 0; j < f->num_uris; ++j) {
+			struct aria_uri *u = &f->uris[j];
+			if (0 == u->num_servers)
+				free(u->servers), u->servers = NULL;
+		}
+	}
+
+}
+
 static void
 parse_download_files(struct aria_download *d, struct json_node *node)
 {
 	void *p;
 
-	free_download_files(d);
+	free_files_of(d);
 
 	d->num_files = json_len(node);
 	d->num_selfiles = 0;
@@ -520,6 +788,9 @@ parse_download_files(struct aria_download *d, struct json_node *node)
 	} else {
 		d->files = p;
 	}
+
+	if (json_isempty(node))
+		return;
 
 	node = json_children(node);
 	do {
@@ -555,20 +826,24 @@ parse_download_files(struct aria_download *d, struct json_node *node)
 
 				do {
 					struct json_node *field = json_children(uris);
-					struct aria_uri uri;
+					struct aria_uri u;
 
+					u.num_servers = 0;
+					u.servers = NULL;
 					do {
 						if (0 == strcmp(field->key, "status")) {
 							if (0 == strcmp(field->val.str, "used"))
-								uri.status = aria_uri_status_used;
+								u.status = aria_uri_status_used;
 							else if (0 == strcmp(field->val.str, "waiting"))
-								uri.status = aria_uri_status_waiting;
+								u.status = aria_uri_status_waiting;
 							else
-								uri.status = aria_uri_status_unknown;
-						} else if (0 == strcmp(field->key, "uri"))
-							uri.uri = strdup(field->val.str);
+								assert(0);
+						} else if (0 == strcmp(field->key, "uri")) {
+							assert(field->val.str);
+							u.uri = strdup(field->val.str);
+						}
 					} while (NULL != (field = json_next(field)));
-					file.uris[uriidx++] = uri;
+					file.uris[uriidx++] = u;
 				} while (NULL != (uris = json_next(uris)));
 			}
 			else
@@ -627,6 +902,10 @@ parse_download(struct aria_download *d, struct json_node *node)
 			memcpy(d->gid, field->val.str, sizeof d->gid);
 		} else if (0 == strcmp(field->key, "files")) {
 			parse_download_files(d, field);
+		} else if (0 == strcmp(field->key, "numPieces")) {
+			d->num_pieces = strtoul(field->val.str, NULL, 10);
+		} else if (0 == strcmp(field->key, "pieceLength")) {
+			d->piece_size = strtoul(field->val.str, NULL, 10);
 		} else if (0 == strcmp(field->key, "bittorrent")) {
 			struct json_node *bt_info, *bt_name;
 
@@ -745,7 +1024,7 @@ download_insufficient(struct aria_download *d)
 }
 
 static void
-parse_downloads(struct json_node *result)
+parse_downloads(struct json_node *result, char oldview)
 {
 	int some_insufficient = 0; /* FIXME? it can cause an infinity loop */
 
@@ -753,13 +1032,16 @@ parse_downloads(struct json_node *result)
 		return;
 
 	/* No more repsonses if no downloads. */
-	for (;NULL != result; result = json_next(result)) {
+	for (; NULL != result; result = json_next(result)) {
 		struct json_node *node;
 		struct aria_download **dd;
 		struct aria_download *d;
+		/* we have to decide based on old value whether download is BitTorrent or not */
+		char *oldname;
 
 		if (json_obj == json_type(result)) {
 			/* FIXME: REMOVE torrent, error + handle other cases too when gid not arrived */
+			error_handler(result);
 			continue;
 		}
 
@@ -768,6 +1050,7 @@ parse_downloads(struct json_node *result)
 		if (NULL != (dd = get_download_bygid(json_get(node, "gid")->val.str))) {
 			d = *dd;
 
+			oldname = d->name;
 			/* these fields are not included in response if not
 			 * applicable, so we do a self reference loop to
 			 * indicate that we do not need to request these next
@@ -779,7 +1062,27 @@ parse_downloads(struct json_node *result)
 
 			parse_download(d, node);
 			some_insufficient |= download_insufficient(d);
+		} else
+			/* we may skip the next get{Serv,Pe}ers response but
+			 * cannot do anything against it because we do not have
+			 * a download to decide its kind */
+			continue;
+
+		if (NULL != oldname ? 'p' == oldview : 'f' == oldview) {
+			result = json_next(result);
+			assert(result);
+
+			if (json_obj == json_type(result)) {
+				error_handler(result);
+				continue;
+			}
+			node = json_children(result);
+
+			/* if type changed in meantime, request is junk */
+			if (!!oldname == !!d->name)
+				(NULL != oldname ? parse_peers : parse_servers)(d, node);
 		}
+
 	}
 
 	if (some_insufficient)
@@ -797,11 +1100,9 @@ aria_download_repos(struct aria_download *d, int32_t pos, enum pos_how how)
 		"POS_END"
 	};
 
-	struct rpc_handler *handler = rpc_writer_prolog();
-	if (NULL == handler)
+	struct rpc_request *req = rpc_new();
+	if (NULL == req)
 		return;
-
-	json_write_int(jw, (int)(handler - rpc_handlers));
 
 	json_write_key(jw, "method");
 	json_write_str(jw, "aria2.changePosition");
@@ -818,18 +1119,15 @@ aria_download_repos(struct aria_download *d, int32_t pos, enum pos_how how)
 	json_write_str(jw, POS_HOW[how]);
 	json_write_endarr(jw);
 
-	rpc_writer_epilog(handler);
-
+	rpc_send(req);
 }
 
 static void
 aria_download_remove(struct aria_download *d, int force)
 {
-	struct rpc_handler *handler = rpc_writer_prolog();
-	if (NULL == handler)
+	struct rpc_request *req = rpc_new();
+	if (NULL == req)
 		return;
-
-	json_write_int(jw, (int)(handler - rpc_handlers));
 
 	json_write_key(jw, "method");
 	json_write_str(jw, force ? "aria2.forceRemove" : "aria2.remove");
@@ -842,17 +1140,15 @@ aria_download_remove(struct aria_download *d, int force)
 	json_write_str(jw, d->gid);
 	json_write_endarr(jw);
 
-	rpc_writer_epilog(handler);
+	rpc_send(req);
 }
 
 static void
 aria_shutdown(int force)
 {
-	struct rpc_handler *handler = rpc_writer_prolog();
-	if (NULL == handler)
+	struct rpc_request *req = rpc_new();
+	if (NULL == req)
 		return;
-
-	json_write_int(jw, (int)(handler - rpc_handlers));
 
 	json_write_key(jw, "method");
 	json_write_str(jw, force ? "aria2.forceShutdown" : "aria2.shutdown");
@@ -863,17 +1159,15 @@ aria_shutdown(int force)
 	json_write_str(jw, secret_token);
 	json_write_endarr(jw);
 
-	rpc_writer_epilog(handler);
+	rpc_send(req);
 }
 
 static void
 aria_pause_all(int pause, int force)
 {
-	struct rpc_handler *handler = rpc_writer_prolog();
-	if (NULL == handler)
+	struct rpc_request *req = rpc_new();
+	if (NULL == req)
 		return;
-
-	json_write_int(jw, (int)(handler - rpc_handlers));
 
 	json_write_key(jw, "method");
 	json_write_str(jw, pause ? (force ? "aria2.forcePauseAll" : "aria2.pauseAll") : "aria2.unpauseAll");
@@ -884,17 +1178,15 @@ aria_pause_all(int pause, int force)
 	json_write_str(jw, secret_token);
 	json_write_endarr(jw);
 
-	rpc_writer_epilog(handler);
+	rpc_send(req);
 }
 
 static void
 aria_download_pause(struct aria_download *d, int pause, int force)
 {
-	struct rpc_handler *handler = rpc_writer_prolog();
-	if (NULL == handler)
+	struct rpc_request *req = rpc_new();
+	if (NULL == req)
 		return;
-
-	json_write_int(jw, (int)(handler - rpc_handlers));
 
 	json_write_key(jw, "method");
 	json_write_str(jw, pause ? (force ? "aria2.forcePause" : "aria2.pause") : "aria2.unpause");
@@ -907,17 +1199,15 @@ aria_download_pause(struct aria_download *d, int pause, int force)
 	json_write_str(jw, d->gid);
 	json_write_endarr(jw);
 
-	rpc_writer_epilog(handler);
+	rpc_send(req);
 }
 
 static void
 aria_remove_result(struct aria_download *d)
 {
-	struct rpc_handler *handler = rpc_writer_prolog();
-	if (NULL == handler)
+	struct rpc_request *req = rpc_new();
+	if (NULL == req)
 		return;
-
-	json_write_int(jw, (int)(handler - rpc_handlers));
 
 	json_write_key(jw, "method");
 	json_write_str(jw, NULL != d ? "aria2.removeDownloadResult" : "aria2.purgeDownloadResult");
@@ -932,7 +1222,7 @@ aria_remove_result(struct aria_download *d)
 	}
 	json_write_endarr(jw);
 
-	rpc_writer_epilog(handler);
+	rpc_send(req);
 }
 
 static void
@@ -992,7 +1282,7 @@ on_notification(char const *method, struct json_node *event)
 static void draw_main(void)
 {
 	switch (view) {
-	case 'a':
+	case 'd':
 		draw_downloads();
 		break;
 
@@ -1008,10 +1298,37 @@ static void draw_main(void)
 	draw_statusline();
 }
 
-static void draw_peers(void)
+static void
+draw_peer(struct aria_peer const *p, size_t i, int *y)
 {
-	/* TODO: peers or getServers */
+	mvaddstr(y, 4, p->peerid);
+	++*y;
+}
 
+static void
+draw_peers(void)
+{
+	if (num_downloads > 0) {
+		struct aria_download *d = downloads[selidx];
+		int y = 0;
+
+		draw_download(d, d, &y);
+
+		if (NULL != d->peers) {
+			size_t i;
+
+			for (i = 0; i < d->num_peers; ++i)
+				draw_peer(d, i, &y);
+
+			/* linewrap */
+			move(y, 0);
+		}
+
+	} else {
+		move(0, 0);
+	}
+	clrtobot();
+	/* move(0, curcol); */
 }
 
 static void
@@ -1050,20 +1367,35 @@ draw_file(struct aria_download const *d, size_t i, int *y)
 	clrtoeol();
 
 	for (j = 0; j < f->num_uris; ++j) {
-		struct aria_uri const *uri = &f->uris[j];
+		struct aria_uri const *u = &f->uris[j];
+		uint32_t k;
 
 		attr_set(A_NORMAL, 0, NULL);
 		mvprintw((*y)++, 0, "      %s╴",
 				j + 1 < f->num_uris ? "├" : "└");
 
-		attr_set(uri->status == aria_uri_status_used ? A_BOLD : A_NORMAL, 0, NULL);
+		attr_set(u->status == aria_uri_status_used ? A_BOLD : A_NORMAL, 0, NULL);
 		printw("%3d%s ",
 				j + 1,
-				uri->status == aria_uri_status_used ? "*" : " ");
-
+				u->status == aria_uri_status_used ? "*" : " ");
 		attr_set(A_NORMAL, 0, NULL);
-		addstr(uri->uri ? uri->uri : "(none)");
+		addstr(u->uri);
 		clrtoeol();
+
+		for (k = 0; k < u->num_servers; ++k) {
+			struct aria_server const *s = &u->servers[k];
+			char szspeed[6];
+
+			szspeed[fmt_speed(szspeed, s->download_speed)] = '\0';
+			if (NULL != s->current_uri)
+				mvprintw((*y)++, 0, "      %s   ↪ %s",
+						j + 1 < f->num_uris ? "│" : " ",
+						s->current_uri);
+			mvprintw((*y)++, 0, "      %s   %s",
+					j + 1 < f->num_uris ? "│" : " ",
+					szspeed);
+			clrtoeol();
+		}
 	}
 }
 
@@ -1085,14 +1417,12 @@ on_download_getfiles(struct json_node *result, struct aria_download *d)
 void
 aria_download_getfiles(struct aria_download *d)
 {
-	struct rpc_handler *handler = rpc_writer_prolog();
-	if (NULL == handler)
+	struct rpc_request *req = rpc_new();
+	if (NULL == req)
 		return;
 
-	json_write_int(jw, (int)(handler - rpc_handlers));
-
-	handler->proc = on_download_getfiles;
-	handler->data = ref_download(d);
+	req->handler = on_download_getfiles;
+	req->arg = ref_download(d);
 	json_write_key(jw, "method");
 	json_write_str(jw, "aria2.getFiles");
 
@@ -1104,7 +1434,7 @@ aria_download_getfiles(struct aria_download *d)
 	json_write_str(jw, d->gid);
 	json_write_endarr(jw);
 
-	rpc_writer_epilog(handler);
+	rpc_send(req);
 }
 
 static void
@@ -1190,6 +1520,9 @@ downloadcmp(struct aria_download const **pthis, struct aria_download const **pot
 	if (x != y)
 		return x > y ? -1 : 1;
 
+	if (this->uploaded != other->uploaded)
+		return this->uploaded > other->uploaded ? -1 : 1;
+
 	/* sort by name */
 	return strcoll(this->display_name, other->display_name);
 }
@@ -1233,11 +1566,16 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 		attr_set(A_NORMAL, 0, NULL);
 		break;
 
-	case DOWNLOAD_ERROR:
+	case DOWNLOAD_ERROR: {
+		int usable_width = 28 + (NULL == d->tags ? tag_col_width : 0);
 		addstr("* ");
 		attr_set(A_BOLD, COLOR_ERR, NULL);
-		printw("%-30.*s", 30, NULL != d->error_message && (strlen(d->error_message) <= 30 || view == VIEWS[1]) ? d->error_message : "");
+		printw("%-*.*s", usable_width, usable_width, NULL != d->error_message && (strlen(d->error_message) <= 30 || view == VIEWS[1]) ? d->error_message : "");
 		attr_set(A_NORMAL, 0, NULL);
+
+		if (NULL == d->tags)
+			goto skip_tags;
+	}
 		break;
 
 	case DOWNLOAD_WAITING:
@@ -1253,15 +1591,9 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 
 	case DOWNLOAD_PAUSED:
 		addstr("| ");
-		goto print_completed;
-
-	case DOWNLOAD_COMPLETE:
-		addstr("  ");
-
-	print_completed:
 		attr_set(A_NORMAL, 0, NULL);
 
-		n = fmt_space(fmtbuf, 1024 * 1024 * 1024); /* d->total */
+		n = fmt_space(fmtbuf, d->total);
 		addnstr(fmtbuf, n);
 
 		addstr("[");
@@ -1269,37 +1601,41 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 		n = fmt_percent(fmtbuf, d->have, d->total);
 		addnstr(fmtbuf, n);
 
-		addstr("]");
+		addstr("], ");
 
 	print_files:
 		if (d->num_files > 0) {
-			addstr(" (");
-			if (d->num_files == d->num_selfiles) {
-				fmtbuf[0] = ' ';
-				fmtbuf[1] = 'a';
-				fmtbuf[2] = 'l';
-				fmtbuf[3] = 'l';
-				n = 4;
-			} else if (0 == d->num_selfiles) {
-				fmtbuf[0] = 'n';
-				fmtbuf[1] = 'o';
-				fmtbuf[2] = 'n';
-				fmtbuf[3] = 'e';
-				n = 4;
-			} else {
+			if (d->num_files != d->num_selfiles) {
 				n = fmt_number(fmtbuf, d->num_selfiles);
-			}
-			addnstr(fmtbuf, n);
+				addnstr(fmtbuf, n);
 
-			addstr("/");
+				addstr("/");
+			} else {
+				addstr("     ");
+			}
 
 			n = fmt_number(fmtbuf, d->num_files);
 			addnstr(fmtbuf, n);
 
-			addstr(" files) ");
+			addstr(1 == d->num_files ? " file " : " files");
 		} else {
 			printw("%19s", "");
 		}
+		break;
+
+	case DOWNLOAD_COMPLETE:
+		addstr("         ");
+
+		attr_set(A_NORMAL, 0, NULL);
+
+		n = fmt_space(fmtbuf, d->total);
+		addnstr(fmtbuf, n);
+
+		addstr(",      ");
+
+		n = fmt_number(fmtbuf, d->num_selfiles);
+		addnstr(fmtbuf, n);
+		addstr(" files");
 		break;
 
 	case DOWNLOAD_ACTIVE:
@@ -1308,66 +1644,52 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 
 		if (d->download_speed > 0) {
 			attr_set(A_BOLD, COLOR_DOWN, NULL);
-
 			n = fmt_percent(fmtbuf, d->have, d->total);
-			addnstr(fmtbuf, n);
+			/* we can save one column because we know that percent
+			 * never will be longer than 100%. */
+			addnstr(fmtbuf + 1, n - 1);
 
 			attr_set(A_NORMAL, 0, NULL);
-
 			addstr(" @ ");
 
 			attr_set(A_BOLD, COLOR_DOWN, NULL);
-			addstr(" ↓ ");
-
 			n = fmt_speed(fmtbuf, d->download_speed);
 			addnstr(fmtbuf, n);
 			addstr(" ");
-			/* addstr("/"); */
-			attr_set(A_NORMAL, -1, NULL);
 		} else {
 			n = fmt_space(fmtbuf, d->total);
 			addnstr(fmtbuf, n);
 
 			addstr("[");
-
 			attr_set(d->have == d->total ? A_NORMAL : A_BOLD, COLOR_DOWN, NULL);
-
 			n = fmt_percent(fmtbuf, d->have, d->total);
 			addnstr(fmtbuf, n);
-
 			attr_set(A_NORMAL, 0, NULL);
-
 			addstr("] ");
-
-			/* if (d->num_seeders > 0)
-				n = fmt_number(fmtbuf, d->num_seeders);
-			else
-				n = fmt_white(fmtbuf, 4);
-			addnstr(fmtbuf, n);
-			x += n; */
-
-			attr_set(A_NORMAL, COLOR_CONN, NULL);
-			if (d->num_connections > 0) {
-				n = fmt_number(fmtbuf, d->num_connections);
-				addnstr(fmtbuf, n);
-			} else {
-				addstr("    ");
-			}
-
-			attr_set(A_NORMAL, 0, NULL);
 		}
+
+		attr_set(A_NORMAL, COLOR_CONN, NULL);
+		if (d->num_connections > 0) {
+			n = fmt_number(fmtbuf, d->num_connections);
+			addnstr(fmtbuf, n);
+		} else {
+			addstr("    ");
+		}
+		attr_set(A_NORMAL, 0, NULL);
 
 		if (d->uploaded > 0) {
 			if (d->upload_speed > 0)
 				attr_set(A_BOLD, COLOR_UP, NULL);
-			addstr(" ↑ ");
+			addstr(" ");
 
 			n = fmt_space(fmtbuf, d->uploaded);
 			addnstr(fmtbuf, n);
 
 			if (d->upload_speed > 0) {
+				attr_set(A_NORMAL, 0, NULL);
 				addstr(" @ ");
 
+				attr_set(A_BOLD, COLOR_UP, NULL);
 				n = fmt_speed(fmtbuf, d->upload_speed);
 				addnstr(fmtbuf, n);
 			} else {
@@ -1383,21 +1705,20 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 				addstr("]");
 			}
 
-			if (d->upload_speed > 0)
-				attr_set(A_NORMAL, -1, NULL);
+			attr_set(A_NORMAL, 0, NULL);
 		} else {
-			printw("%14s", "");
+			printw("%12s", "");
 		}
 
 		break;
 	}
 
-	addstr(" ");
 	if (NULL != d->tags) {
 		int oy, ox, ny, nx, mx;
 
 		getyx(stdscr, oy, ox);
 
+		addstr(" ");
 		addstr(d->tags);
 
 		mx = getmaxx(stdscr);
@@ -1414,9 +1735,10 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 	}
 	if (0 < tag_col_width) {
 		printw("%*.s", tag_col_width - tagwidth, "");
-		addstr(" ");
 	}
 
+skip_tags:
+	addstr(" ");
 	curcol = getcurx(stdscr);
 	addstr(d->display_name);
 	clrtoeol();
@@ -1430,7 +1752,8 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 			addstr(d->error_message);
 			attr_set(A_NORMAL, 0, NULL);
 			clrtoeol();
-			++*y;
+			/* error message may span multiple lines */
+			*y = getcury(stdscr) + 1;
 		}
 		break;
 	}
@@ -1641,11 +1964,11 @@ draw_all(void)
 }
 
 static void
-on_update_all(struct json_node *result, void *data)
+on_update_all(struct json_node *result, void *arg)
 {
 	int some_insufficient = 0;
 
-	(void)data;
+	(void)arg;
 
 	if (NULL == result)
 		return;
@@ -1718,10 +2041,8 @@ compute_global(void)
 }
 
 static void
-on_periodic(struct json_node *result, void *data)
+on_periodic(struct json_node *result, void *arg)
 {
-	(void)data;
-
 	if (NULL == result)
 		return;
 
@@ -1744,12 +2065,12 @@ on_periodic(struct json_node *result, void *data)
 
 #endif
 
-	draw_statusline();
-
 	result = json_next(result);
 	if (NULL != result) {
-		parse_downloads(result);
+		parse_downloads(result, (char)arg);
 		on_downloads_change(1);
+	} else {
+		draw_statusline();
 	}
 
 	refresh();
@@ -1856,14 +2177,14 @@ stripwhite(char *str, size_t *n)
 }
 
 static void
-on_session_info(struct json_node *result, void *data)
+on_session_info(struct json_node *result, void *arg)
 {
 	char *tmp = getenv("TMP");
 
 	if (NULL == result)
 		return;
 
-	(void)data;
+	(void)arg;
 
 	snprintf(tempfile, sizeof tempfile, "/%s/aria2.%s",
 			NULL != tmp ? tmp : "tmp",
@@ -1873,12 +2194,10 @@ on_session_info(struct json_node *result, void *data)
 static void
 gentmp(void)
 {
-	struct rpc_handler *handler = rpc_writer_prolog();
-	if (NULL == handler)
+	struct rpc_request *req = rpc_new();
+	if (NULL == req)
 		return;
-
-	handler->proc = on_session_info;
-	json_write_int(jw, (int)(handler - rpc_handlers));
+	req->handler = on_session_info;
 
 	json_write_key(jw, "method");
 	json_write_str(jw, "aria2.getSessionInfo");
@@ -1889,7 +2208,7 @@ gentmp(void)
 	json_write_str(jw, secret_token);
 	json_write_endarr(jw);
 
-	rpc_writer_epilog(handler);
+	rpc_send(req);
 }
 
 static int
@@ -1939,6 +2258,10 @@ parse_option(char const *option, char const *value, struct aria_download *d)
 			d->download_speed_limit = atol(value);
 		else if (0 == strcmp("max-upload-limit", option))
 			d->upload_speed_limit = atol(value);
+		else if (0 == strcmp("dir", option)) {
+			free(d->dir), d->dir = strdup(value);
+			update_tags(d);
+		}
 	} else {
 		if (0 == strcmp("max-concurrent-downloads", option))
 			globalstat.max_concurrency = atol(value);
@@ -1984,7 +2307,7 @@ on_show_options(struct json_node *result, struct aria_download *d)
 	int err;
 	char *line;
 	size_t linesiz;
-	struct rpc_handler *handler;
+	struct rpc_request *req;
 	int action;
 
 	if (NULL == result)
@@ -2010,13 +2333,12 @@ on_show_options(struct json_node *result, struct aria_download *d)
 	if (NULL == (f = fopen(tempfile, "r")))
 		return;
 
-	handler = rpc_writer_prolog();
-	if (NULL == handler)
+	req = rpc_new();
+	if (NULL == req)
 		return;
 
-	handler->proc = on_options_change;
-	handler->data = NULL != d ? ref_download(d) : NULL;
-	json_write_int(jw, (int)(handler - rpc_handlers));
+	req->handler = on_options_change;
+	req->arg = NULL != d ? ref_download(d) : NULL;
 
 	json_write_key(jw, "method");
 	json_write_str(jw, NULL != d ? "aria2.changeOption" : "aria2.changeGlobalOption");
@@ -2059,7 +2381,7 @@ on_show_options(struct json_node *result, struct aria_download *d)
 	free(line);
 	fclose(f);
 
-	rpc_writer_epilog(handler);
+	rpc_send(req);
 
 out:
 	if (NULL != d)
@@ -2069,13 +2391,12 @@ out:
 static void
 update_options(struct aria_download *d, int user)
 {
-	struct rpc_handler *handler = rpc_writer_prolog();
-	if (NULL == handler)
+	struct rpc_request *req = rpc_new();
+	if (NULL == req)
 		return;
 
-	handler->proc = user ? on_show_options : on_options;
-	handler->data = NULL != d ? ref_download(d) : NULL;
-	json_write_int(jw, (int)(handler - rpc_handlers));
+	req->handler = user ? on_show_options : on_options;
+	req->arg = NULL != d ? ref_download(d) : NULL;
 
 	json_write_key(jw, "method");
 	json_write_str(jw, NULL != d ? "aria2.getOption" : "aria2.getGlobalOption");
@@ -2090,7 +2411,7 @@ update_options(struct aria_download *d, int user)
 	}
 	json_write_endarr(jw);
 
-	rpc_writer_epilog(handler);
+	rpc_send(req);
 	/* update_delta(NULL != d ? 0 : 1); */
 }
 
@@ -2125,23 +2446,23 @@ ar_download_select_files(void)
 }
 #endif
 
-struct downloads_add_data {
+struct downloads_add_arg {
 	size_t nlines;
 	char **lines;
 };
 
 /* select (last) newly added download and write back errorneous files */
 static void
-on_downloads_add(struct json_node *result, struct downloads_add_data *data)
+on_downloads_add(struct json_node *result, struct downloads_add_arg *arg)
 {
 	FILE *f;
 	size_t n;
 
 	if (NULL == result) {
-		if (NULL != data) {
-			while (data->nlines > 0)
-				free(data->lines[--data->nlines]);
-			free(data);
+		if (NULL != arg) {
+			while (arg->nlines > 0)
+				free(arg->lines[--arg->nlines]);
+			free(arg);
 		}
 		return;
 	}
@@ -2149,37 +2470,33 @@ on_downloads_add(struct json_node *result, struct downloads_add_data *data)
 	if (json_isempty(result))
 		goto out;
 
-	f = NULL != data ? fopen(tempfile, "w") : NULL;
+	f = NULL != arg ? fopen(tempfile, "w") : NULL;
 
 	n = 0;
 	result = json_children(result);
 	do {
 		struct aria_download **dd;
 
-		switch (json_type(result)) {
-		case json_obj:
+		if (json_obj == json_type(result)) {
 			error_handler(result);
 
 			if (NULL != f)
-				fputs(data->lines[n], f);
-			break;
-
-		case json_str:
-			if (NULL != (dd = get_download_bygid(result->val.str)))
-				selidx = dd - downloads;
-			break;
-
-		case json_arr:
-			if (NULL != (dd = get_download_bygid(json_children(json_children(result))->val.str)))
-				selidx = dd - downloads;
-			break;
-
-		default:
-			assert(!"unexpected result type");
+				fputs(arg->lines[n], f);
+		} else {
+			struct json_node *gid = json_children(result);
+			if (json_str == json_type(gid)) {
+				/* single GID returned */
+				if (NULL != (dd = get_download_bygid(gid->val.str)))
+					selidx = dd - downloads;
+			} else {
+				/* get first GID of the array */
+				if (NULL != (dd = get_download_bygid(json_children(gid)->val.str)))
+					selidx = dd - downloads;
+			}
 		}
 
-		if (NULL != data)
-			free(data->lines[n]);
+		if (NULL != arg)
+			free(arg->lines[n]);
 		++n;
 	} while (NULL != (result = json_next(result)));
 
@@ -2187,23 +2504,23 @@ on_downloads_add(struct json_node *result, struct downloads_add_data *data)
 		fclose(f);
 
 out:
-	if (NULL != data) {
-		free(data->lines);
-		free(data);
+	if (NULL != arg) {
+		free(arg->lines);
+		free(arg);
 	}
 }
 
 static void
 add_downloads(char cmd)
 {
-	struct rpc_handler *handler;
+	struct rpc_request *req;
 	FILE *f;
 	char *line;
 	size_t linesiz;
 	ssize_t err;
 	size_t linelen;
 	int action;
-	struct downloads_add_data *data;
+	struct downloads_add_arg *arg;
 
 	if ((action = runaction(NULL, "%c", cmd)) < 0)
 		action = fileout(1);
@@ -2218,14 +2535,13 @@ add_downloads(char cmd)
 		return;
 	}
 
-	handler = rpc_writer_prolog();
-	if (NULL == handler)
+	req = rpc_new();
+	if (NULL == req)
 		return;
 
-	data = malloc(sizeof *data);
+	arg = malloc(sizeof *arg);
 
-	handler->proc = on_downloads_add;
-	json_write_int(jw, (int)(handler - rpc_handlers));
+	req->handler = on_downloads_add;
 
 	json_write_key(jw, "method");
 	json_write_str(jw, "system.multicall");
@@ -2235,22 +2551,22 @@ add_downloads(char cmd)
 	/* 1st arg: “methods” */
 	json_write_beginarr(jw); /* {{{ */
 
-	data->lines = NULL, data->nlines = 0;
+	arg->lines = NULL, arg->nlines = 0;
 	line = NULL, linesiz = 0;
 	while (-1 != (err = getline(&line, &linesiz, f))) {
 		char *uri;
 		char *b64str = NULL;
 		enum { kind_torrent, kind_metalink, kind_uri } kind;
 
-		if (NULL != data) {
+		if (NULL != arg) {
 			char **newlines;
 
-			if (NULL != (newlines = realloc(data->lines, ++data->nlines * sizeof *data->lines))) {
-				(data->lines = newlines)[data->nlines - 1] = strdup(line);
+			if (NULL != (newlines = realloc(arg->lines, ++arg->nlines * sizeof *arg->lines))) {
+				(arg->lines = newlines)[arg->nlines - 1] = strdup(line);
 			} else {
-				free(data->lines);
-				free(data);
-				data = NULL;
+				free(arg->lines);
+				free(arg);
+				arg = NULL;
 			}
 
 		}
@@ -2337,21 +2653,20 @@ add_downloads(char cmd)
 	json_write_endarr(jw); /* }}} */
 	json_write_endarr(jw);
 
-	handler->data = data;
+	req->arg = arg;
 
-	rpc_writer_epilog(handler);
+	rpc_send(req);
 }
 
 static void
 update_all(void)
 {
 	unsigned n;
-	struct rpc_handler *handler = rpc_writer_prolog();
-	if (NULL == handler)
+	struct rpc_request *req = rpc_new();
+	if (NULL == req)
 		return;
 
-	handler->proc = on_update_all;
-	json_write_int(jw, (int)(handler - rpc_handlers));
+	req->handler = on_update_all;
 
 	json_write_key(jw, "method");
 	json_write_str(jw, "system.multicall");
@@ -2416,6 +2731,8 @@ update_all(void)
 		json_write_str(jw, "downloadSpeed");
 		/* json_write_str(jw, "seeder"); */
 		json_write_str(jw, "bittorrent");
+		json_write_str(jw, "numPieces");
+		json_write_str(jw, "pieceLength");
 		if (is_local)
 			json_write_str(jw, "files");
 		json_write_endarr(jw);
@@ -2429,7 +2746,7 @@ out_of_loop:
 	json_write_endarr(jw); /* }}} */
 	json_write_endarr(jw);
 
-	rpc_writer_epilog(handler);
+	rpc_send(req);
 }
 
 static void
@@ -2458,18 +2775,18 @@ try_connect(void)
 static void
 update_delta(int all)
 {
-	struct rpc_handler *handler;
+	struct rpc_request *req;
 
 	if (ws_fd < 0) {
 		try_connect();
 		return;
 	}
 
-	if (NULL == (handler = rpc_writer_prolog()))
+	if (NULL == (req = rpc_new()))
 		return;
 
-	handler->proc = on_periodic;
-	json_write_int(jw, (int)(handler - rpc_handlers));
+	req->handler = on_periodic;
+	req->arg = (void *)view;
 
 	json_write_key(jw, "method");
 	json_write_str(jw, "system.multicall");
@@ -2535,6 +2852,8 @@ update_delta(int all)
 					json_write_str(jw, "seeder"); */
 
 				json_write_str(jw, "bittorrent");
+				json_write_str(jw, "numPieces");
+				json_write_str(jw, "pieceLength");
 				d->requested_bittorrent = 1;
 			} else if (0 == d->num_files && ((NULL == d->name && d->status >= 0) || is_local)) {
 				/* If “bittorrent.info.name” is empty then
@@ -2544,7 +2863,7 @@ update_delta(int all)
 			}
 
 			if (view == 'f')
-				if (0 == d->num_files || (d->have != d->total && DOWNLOAD_ACTIVE == abs(d->status)))
+				if (0 == d->num_files || (d->have != d->total && DOWNLOAD_ACTIVE == abs(d->status)) || d->status < 0)
 					json_write_str(jw, "files");
 
 			if (d->status < 0 && d->total == 0) {
@@ -2588,6 +2907,21 @@ update_delta(int all)
 
 			json_write_endarr(jw);
 			json_write_endobj(jw);
+
+			if (NULL != d->name ? 'p' == view : 'f' == view) {
+				json_write_beginobj(jw);
+				json_write_key(jw, "methodName");
+				json_write_str(jw, NULL != d->name ? "aria2.getPeers" : "aria2.getServers");
+				json_write_key(jw, "params");
+				json_write_beginarr(jw);
+				/* “secret” */
+				json_write_str(jw, secret_token);
+				/* “gid” */
+				json_write_str(jw, d->gid);
+				json_write_endarr(jw);
+				json_write_endobj(jw);
+			}
+
 		}
 	}
 
@@ -2595,7 +2929,7 @@ update_delta(int all)
 
 	json_write_endarr(jw); /* }}} */
 
-	rpc_writer_epilog(handler);
+	rpc_send(req);
 }
 
 static void
@@ -2624,9 +2958,9 @@ writetemp(void)
 }
 
 static void
-on_download_remove(struct json_node *result, void *data)
+on_download_remove(struct json_node *result, void *arg)
 {
-	(void)data;
+	(void)arg;
 
 	if (NULL == result)
 		return;
