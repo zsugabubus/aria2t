@@ -553,10 +553,19 @@ has_tags:
 	for (p = d->tags; NULL != (p += strcspn(p, "\t\r\n")) && '\0' != *p; ++p)
 		*p = ' ';
 
-	return;
+	goto changed;
 
 no_tags:
 	free(d->tags), d->tags = NULL;
+	goto changed;
+
+changed:
+	/* when longest tag changes we have to reset column width; at next draw
+	 * it will be recomputed */
+	if (longest_tag == d) {
+		longest_tag = NULL;
+		tag_col_width = 0;
+	}
 }
 
 static struct aria_uri *
@@ -1361,7 +1370,7 @@ draw_peer(struct aria_download const *d, size_t i, int *y)
 	szpeerspeed[fmt_speed(szpeerspeed, p->peer_download_speed)] = '\0';
 
 	attr_set(A_BOLD, 0, NULL);
-	mvprintw(*y, 4, "%*.*s", ipw, ipw, p->ip);
+	mvprintw(*y, 0, "  %*.*s", ipw, ipw, p->ip);
 
 	attr_set(A_NORMAL, 0, NULL);
 	printw(":%u  %s @ %s  ", p->port, szpercent, szpeerspeed);
@@ -2189,6 +2198,9 @@ runaction(struct aria_download *d, const char *name, ...)
 	vsnprintf(filename, sizeof filename, name, argptr);
 	va_end(argptr);
 
+	if (NULL == d && 0 < num_downloads)
+		d = downloads[selidx];
+
 	if (getenv("ARIA2T_CONFIG"))
 		snprintf(filepath, sizeof filepath, "%s/actions/%s",
 				getenv("ARIA2T_CONFIG"), filename);
@@ -2203,7 +2215,7 @@ runaction(struct aria_download *d, const char *name, ...)
 
 	if (0 == (pid = fork())) {
 		execlp(filepath, filepath,
-				NULL == d ? (num_downloads > 0 ? downloads[selidx]->gid : "") : d->gid,
+				NULL != d ? d->gid : "",
 				tempfile,
 				NULL);
 		_exit(127);
