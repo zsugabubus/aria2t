@@ -2146,13 +2146,15 @@ on_update_all(struct json_node *result, void *arg)
 	if (NULL != select_file) {
 		struct aria_download **dd;
 
-		view = 'f';
-		/* update view immediately */
-		some_insufficient = 1;
+		if (NULL != (dd = find_download_byfile(select_file))) {
+			view = 'f';
+			/* update view immediately */
+			some_insufficient = 1;
 
-		if (NULL != (dd = find_download_byfile(select_file)))
 			selidx = dd - downloads;
-		draw_cursor();
+
+			draw_cursor();
+		}
 	}
 
 	refresh();
