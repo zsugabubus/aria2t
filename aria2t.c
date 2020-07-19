@@ -1656,12 +1656,15 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 		break;
 
 	case DOWNLOAD_WAITING:
-		printw("%-8d", d->queue_index);
+		printw("%-11d", d->queue_index);
 
 		attr_set(A_NORMAL, 0, NULL);
-
-		n = fmt_space(fmtbuf, d->total);
-		addnstr(fmtbuf, n);
+		if (0 < d->total) {
+			n = fmt_space(fmtbuf, d->total);
+			addnstr(fmtbuf, n);
+		} else {
+			addstr("    ");
+		}
 		addstr(" ");
 
 		goto print_files;
