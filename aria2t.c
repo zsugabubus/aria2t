@@ -1390,7 +1390,7 @@ draw_peer(struct aria_download const *d, size_t i, int *y)
 	mvprintw(*y, 0, "  %*.*s", ipw, ipw, p->ip);
 
 	attr_set(A_NORMAL, 0, NULL);
-	printw(":%-6u  ", p->port);
+	printw(":%-5u  ", p->port);
 
 	n = fmt_percent(fmtbuf, p->pieces_have, d->num_pieces);
 	addnstr(fmtbuf, n);
