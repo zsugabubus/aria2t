@@ -47,7 +47,7 @@ ws_connect(char const *host, in_port_t port)
 {
 	struct addrinfo hints;
 	struct addrinfo *addrs, *p;
-	int err;
+	int ret;
 	char port_str[sizeof "65536"];
 
 	memset(&hints, 0, sizeof hints);
@@ -58,8 +58,12 @@ ws_connect(char const *host, in_port_t port)
 
 	sprintf(port_str, "%hu", port);
 
-	if ((err = getaddrinfo(host, port_str, &hints, &addrs))) {
-		free(error_message), error_message = strdup("failed to resolve");
+	if ((ret = getaddrinfo(host, port_str, &hints, &addrs))) {
+		free(error_message);
+		if (EAI_SYSTEM != ret)
+			error_message = strdup(gai_strerror(ret));
+		else
+			error_message = strdup(strerror(errno));
 		return 1;
 	}
 
@@ -93,7 +97,7 @@ ws_connect(char const *host, in_port_t port)
 	freeaddrinfo(addrs);
 
 	if (ws_fd == -1) {
-		free(error_message), error_message = strdup("failed to connect");
+		ws_strerror();
 		return 1;
 	}
 

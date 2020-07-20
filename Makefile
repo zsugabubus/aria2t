@@ -35,6 +35,6 @@ uninstall :
 	$(RM) $(patsubst %,$(DESTDIR)$(PREFIX)/%,$(TARGETS)) $(patsubst %,$(DESTDIR)$(MANPREFIX)/man1/%.1.gz,$(TARGETS))
 
 clean :
-	$(RM) $(TARGET)
+	$(RM) $(TARGETS)
 
 .PHONY: all bootstrap install install-% uninstall clean

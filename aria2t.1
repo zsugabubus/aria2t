@@ -8,19 +8,42 @@ aria2t \- an aria2c terminal frontend
 .
 .SH DESCRIPTION
 .B aria2t
-is a low footprint terminal frontend for \fBaria2c\fR(1).
+is a low footprint terminal frontend for
+.BR aria2c (1).
 .
 .SH OPTIONS
 .TP
-.B --select-gid \fIGID\fB
-Select download matching \fIGID\fR.
+.BI \-\-select-gid\  gid
+Select download with
+.IR gid .
 .
 .TP
-.B --select-file \fIPATH\fB
-Select download with \fIPATH\fR.
+.BI \-\-select-file\  path
+Select download matching
+.IR path
+and switch to file view.
+.
+.SH TERMINOLOGY
+.SS Session file
+A temporary file that used for exchanging data between aria2t and user (actions).
+.
+.SS Actions
+Actions are executable programs, used for customizing the behavior of
+.IR aria2t .
+.sp
+They always receive the following arguments:
+.
+.IP 1.
+Selection GID (or empty if there are none).
+.IP 2.
+Path to the session file, that contains TAB-separated information about selection.
+.PP
+If an action terminates with failure, in-progress operation is cancelled. When
+an actions does not exist, either a default, builtin action is executed or it
+is treated like it was terminated with success.
 .
 .SH USAGE
-.
+.SS "Keyboard Control"
 .TP
 .B k, UP
 Move selection upwards.
@@ -68,8 +91,8 @@ Pause selected/all download(s).
 .TP
 .B a, A, +
 Add download(s) from file (one per line). If there are no associated actions,
-opens \fBEDITOR\fR. Lastly added download gets selected. Lines that could not
-be added are get written back to the file.
+opens file for editing. Lastly added download gets selected. Lines that could
+not be added are get written back to the file.
 .sp
 Lines ending with \fB.torrent\fR and \fB.meta4\fR or \fB.metalink\fR are treated
 like Torrent and Metalink files on the local filesystem. In every other
@@ -81,7 +104,7 @@ Downloads inserted after the selection in the queue.
 .TP
 .B i, I
 Show selected download/global options in a TAB-separated key-value format. If
-there are no associated actions, displays options using \fBPAGER\fR. To change
+there are no associated actions, opens session file for viewing. To change
 an option edit the file.
 .
 .TP
@@ -100,17 +123,20 @@ Switch to next/previous view.
 The following views are available (in this order):
 .RS
 .IP \(bu
-Downloads (default). Shows downloads in an auto-ordered list: Topmost the queued
+.BR Downloads \ (default).
+Shows downloads in an auto-ordered list: Topmost the queued
 and currently active ones; completed downloads and errors at the bottom;
 everything else is in-between.
 .IP \(bu
-Files. Shows files of a download, URIs of files and the servers used for downloading a
-URI. Starred URIs are the ones that were used for downloading. Dashed (\*(lq----\*(rq)
+.BR Files.
+Shows download state and path for files of a download, URIs of files and servers used for downloading a
+URI. Starred (\*(lq*\*(rq) URIs are the ones that were used for downloading. Dashed (\*(lq----\*(rq)
 progress means an unselected file.
 .IP \(bu
-Peers. Shows connected BitTorrent peers\*(Lp IP address, port number, (their) progress
-and download speed, speed information about how fast aria2c downloads and uploads
-from/to them, and finally the peer id. Dashed (\*(lq----\*(rq) slots means choking.
+.BR Peers.
+Shows connected BitTorrent peers\(aq IP address, port number, (their) progress
+and download speed, speed information about how fast aria2 downloads and uploads
+from/to them (dashes means choking), and the peer id.
 .PP
 .RE
 .
@@ -144,57 +170,67 @@ Reinitialize connection.
 Run action \*(lqQ\*(rq then shut down aria2.
 .
 .TP
-.R (everything else)
-Run action under \fB$ARIA2T_CONFIG/actions\fR named like the pressed
-key.
-.
-.SS Session file
-.
-A temporary file that used for communicating with the user and actions.
-.
-.SS Actions
-.
-Actions receive two arguments:
-.RS
-.IP \(bu
-Selected GID.
-.IP \(bu
-Path to the session file, filled with TAB-separated information about selection.
-.RE
-.PP
-If an action terminates with failure, in-progress operation is cancelled.
+.R (other)
+Run action named like the pressed key. Uses
+.BR keyname (3x).
 .
 .SH ENVIRONMENT
-.
 .TP
-.I ARIA_RPC_HOST
+.B ARIA_RPC_HOST
 Hostname of the RPC endpoint to connect to.
 .sp
 Default: 127.0.0.1.
 .
 .TP
-.I ARIA_RPC_PORT
+.B ARIA_RPC_PORT
 Port number of the RPC endpoint to connect to.
 .sp
 Default: 6800.
 .
 .TP
-.I ARIA_RPC_SECRET
+.B ARIA_RPC_SECRET
 See
 .I RPC authorization secret token
-in aria2c(1)\&.
+in
+.BR aria2c (1).
 .sp
 Default: (empty).
 .
 .TP
-.I ARIA2T_CONFIG
-Set configuration root directory.
+.B ARIA2T_CONFIG
+Configuration root directory.
 .sp
-Default: $HOME/.config/aria2t.
+Default:
+.IR $HOME/.config/aria2t .
 .
 .TP
-.I TMP
+.B VISUAL, EDITOR
+Used program for opening session file for editing.
+.sp
+Default:
+.BR vi (1).
+.
+.TP
+.B PAGER
+Used program for opening session file for viewing.
+.sp
+Default:
+.BR less (1).
+.
+.TP
+.B TMPDIR
 Where to create session file.
+.sp
+Default:
+.IR /tmp .
+.
+.SH FILES
+.TP
+.I $ARIA2T_CONFIG/actions
+Actions directory.
+.TP
+.I $TMPDIR/aria2t.XXXXXX
+Session file.
 .
 .SH EXAMPLE
 Connect to “127.0.0.1:16800” using “$$secret$$” token.
@@ -207,7 +243,7 @@ Please report bugs at
 \%https://github.com/zsugabubus/aria2t/issues.
 .
 .SH SEE ALSO
-.BR aria2c(1)
+.BR aria2c (1)
 .
 .SH AUTHORS
 zsugabubus

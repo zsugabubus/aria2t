@@ -1,15 +1,15 @@
 # aria2t
 
 Stupid TUI for `aria2c(1)` with Vim-like keybindings. Strives to be
-minimal and scriptable.
+minimal but complete.
 
 ## Features
 
-* **Multiple views.** Downloads list, files list and peers/servers list.
-* **Event driven.** TUI never hangs because of slow Internet.
+* **Multiple views.** Downloads, files, peers.
+* **Event driven.** TUI never lags because of slow Internet.
 * **Efficient.** Requests and updates only what needed.
-* **Scriptable.** Bind an executable to any (free) key.
-* **Batteries included.** ~90% of RPC commands covered.
+* **Scriptable.** Bind an executable to any key.
+* **Batteries included.** Most RPC commands covered.
 
 ## Dependencies
 
