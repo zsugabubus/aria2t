@@ -45,8 +45,6 @@ static int downloads_need_reflow = 0;
 static int tag_col_width = 0;
 static struct aria_download const *longest_tag;
 
-static int retcode = EXIT_FAILURE;
-
 static int do_forced = 0;
 static int oldselidx;
 static int selidx = 0;
@@ -73,7 +71,7 @@ static struct pollfd fds[
 #define COLOR_EOF  5
 
 #define CONTROL(letter) ((letter) - '@')
-#define ARRAY_LEN(arr) (sizeof arr / sizeof *arr)
+#define array_len(arr) (sizeof arr / sizeof *arr)
 
 #define VIEWS "\0dfp"
 static char view = VIEWS[1];
@@ -348,7 +346,7 @@ load_config(void)
 	(str = getenv("ARIA_RPC_SECRET")) ||
 	(str = "");
 
-	secret_token = malloc(snprintf(NULL, 0, "token:%s", str));
+	secret_token = malloc(snprintf(NULL, 0, "token:%s", str) + 1);
 	if (NULL == secret_token) {
 		perror("malloc()");
 		return -1;
@@ -356,18 +354,6 @@ load_config(void)
 
 	sprintf(secret_token, "token:%s", str);
 	return 0;
-}
-
-static int
-rpc_connect(void)
-{
-	return ws_connect(remote_host, remote_port);
-}
-
-static int
-rpc_shutdown(void)
-{
-	return ws_shutdown();
 }
 
 struct aria_download *
@@ -549,8 +535,8 @@ on_notification(char const *method, struct json_node *event)
 	}
 }
 
-int
-on_ws_message(char *msg, size_t msglen)
+void
+on_ws_message(char *msg, uint64_t msglen)
 {
 	static struct json_node *nodes;
 	static size_t num_nodes;
@@ -589,18 +575,19 @@ on_ws_message(char *msg, size_t msglen)
 
 	/* json_debug(nodes, 0); */
 	/* json_debug(json_get(json_get(nodes, "result"), "version"), 0); */
-	return 0;
 }
 
 static struct rpc_request *
 new_rpc(void)
 {
+	uint8_t n;
 	struct rpc_request *req;
-	size_t n = ARRAY_LEN(rpc_requests);
 
-	while (n > 0)
-		if (NULL == (req = &rpc_requests[--n])->handler)
+	for (n = array_len(rpc_requests); n > 0;) {
+		req = &rpc_requests[--n];
+		if (NULL == req->handler)
 			goto found;
+	}
 
 	return NULL;
 
@@ -619,15 +606,84 @@ found:
 	return req;
 }
 
+
 static void
-do_rpc(struct rpc_request *req)
+clear_rpc_requests(void)
+{
+	uint8_t n;
+
+	for (n = array_len(rpc_requests); n > 0;) {
+		struct rpc_request *req = &rpc_requests[--n];
+
+		if (NULL != req->handler) {
+			req->handler(NULL, req->arg);
+			free_rpc(req);
+		}
+	}
+}
+
+static void
+update_options(struct aria_download *d, int user);
+
+static char *
+parse_session_info(struct json_node *node)
+{
+	/* First kv-pair.  */
+	node = json_children(node);
+	do {
+		if (0 == strcmp(node->key, "sessionId"))
+			return node->val.str;
+	} while (NULL != (node = json_next(node)));
+
+	return NULL;
+}
+
+static void
+on_session_info(struct json_node *result, void *arg)
+{
+	char *tmpdir;
+
+	(void)arg;
+
+	if (NULL == result)
+		return;
+
+	(tmpdir = getenv("TMPDIR")) ||
+	(tmpdir = "/tmp");
+
+	snprintf(session_file, sizeof session_file, "%s/aria2t.%s",
+			tmpdir,
+			parse_session_info(result));
+}
+
+static void
+do_rpc(void)
 {
 	json_write_endobj(jw);
+	ws_write(jw->buf, jw->len);
+}
 
-	if (ws_write(jw->buf, jw->len)) {
-		req->handler(NULL, req->arg);
-		free_rpc(req);
-	}
+static void
+gentmp(void)
+{
+	struct rpc_request *req;
+
+	session_file[0] = '\0';
+
+	if (NULL == (req = new_rpc()))
+		return;
+	req->handler = on_session_info;
+
+	json_write_key(jw, "method");
+	json_write_str(jw, "aria2.getSessionInfo");
+
+	json_write_key(jw, "params");
+	json_write_beginarr(jw);
+	/* “secret” */
+	json_write_str(jw, secret_token);
+	json_write_endarr(jw);
+
+	do_rpc();
 }
 
 static void
@@ -1088,19 +1144,6 @@ d->local = strto##type(field->val.str, NULL, 10);
 	update_display_name(d);
 }
 
-static char *
-parse_session_info(struct json_node *node)
-{
-	/* First kv-pair.  */
-	node = json_children(node);
-	do {
-		if (0 == strcmp(node->key, "sessionId"))
-			return node->val.str;
-	} while (NULL != (node = json_next(node)));
-
-	return NULL;
-}
-
 typedef void(*parse_options_cb)(char const *, char const *, void *);
 
 static void
@@ -1142,9 +1185,6 @@ parse_global_stat(struct json_node *node)
 	} while (NULL != (node = json_next(node)));
 }
 
-static void
-update_delta(int all);
-
 static int
 download_insufficient(struct aria_download *d)
 {
@@ -1180,6 +1220,15 @@ parse_option(char const *option, char const *value, struct aria_download *d)
 			is_local = 0 == access(value, R_OK | W_OK | X_OK);
 	}
 }
+
+static void
+try_connect(void)
+{
+	ws_connect(remote_host, remote_port);
+}
+
+static void
+update_delta(int all);
 
 struct periodic_arg {
 	unsigned has_get_peers: 1;
@@ -1252,6 +1301,254 @@ parse_downloads(struct json_node *result, struct periodic_arg *arg)
 		update_delta(1);
 }
 
+static void
+compute_global(void)
+{
+	struct aria_download **dd = downloads;
+	struct aria_download **const end = &downloads[num_downloads];
+
+	globalstat.have_total = 0;
+	globalstat.upload_total = 0;
+
+	for (; dd < end; ++dd) {
+		struct aria_download const *const d = *dd;
+		globalstat.have_total += d->have;
+		globalstat.upload_total += d->uploaded;
+	}
+
+	/* reset counter */
+	globalstat.compute_total = 0;
+}
+
+static void
+on_periodic(struct json_node *result, struct periodic_arg *arg)
+{
+	if (NULL == result)
+		goto out;
+
+	/* Result is an array. Go to the first element. */
+	result = json_children(result);
+	parse_global_stat(result);
+
+	/* there is some activity so we need to recount soon */
+	if (globalstat.upload_speed > 0 || globalstat.download_speed > 0)
+		compute_global();
+
+	if (globalstat.compute_total > 0)
+		compute_global();
+
+#if 0
+		++globalstat.compute_total;
+	/* activity stopped but there was some before. let's update. */
+	else if (globalstat.compute_total > 0)
+		compute_global();
+
+#endif
+
+	result = json_next(result);
+	if (NULL != result) {
+		parse_downloads(result, arg);
+		on_downloads_change(1);
+	} else {
+		draw_statusline();
+	}
+
+	refresh();
+
+out:
+	free(arg);
+}
+
+static int
+getmainheight(void)
+{
+	return getmaxy(stdscr)/*window height*/ - 1/*status line*/;
+}
+
+static void
+update_delta(int all)
+{
+	struct rpc_request *req;
+
+	if (!ws_isalive()) {
+		try_connect();
+		return;
+	}
+
+	if (NULL == (req = new_rpc()))
+		return;
+
+	req->handler = (rpc_handler)on_periodic;
+
+	json_write_key(jw, "method");
+	json_write_str(jw, "system.multicall");
+
+	json_write_key(jw, "params");
+	json_write_beginarr(jw); /* {{{ */
+	/* 1st arg: “methods” */
+	json_write_beginarr(jw); /* {{{ */
+
+	/* update unconditionally */{
+		json_write_beginobj(jw);
+		json_write_key(jw, "methodName");
+		json_write_str(jw, "aria2.getGlobalStat");
+		json_write_key(jw, "params");
+		json_write_beginarr(jw);
+		/* “secret” */
+		json_write_str(jw, secret_token);
+		json_write_endarr(jw);
+		json_write_endobj(jw);
+	}
+	if (num_downloads > 0) {
+		struct aria_download **dd;
+		int i, n;
+		struct periodic_arg *arg;
+		if (all && view == VIEWS[1]) {
+			dd = &downloads[topidx];
+			n = getmainheight();
+
+			if ((size_t)(topidx + n) > num_downloads)
+				n = num_downloads - topidx;
+		} else {
+			dd = &downloads[selidx];
+			n = !!num_downloads;
+		}
+
+		if (NULL == (arg = malloc(n * sizeof *arg))) {
+			free_rpc(req);
+			return;
+		}
+		req->arg = arg;
+
+		for (i = 0; i < n; ++i, ++dd, ++arg) {
+			struct aria_download *d = *dd;
+
+			if (d->status < 0)
+				globalstat.compute_total = 1;
+
+			json_write_beginobj(jw);
+			json_write_key(jw, "methodName");
+			json_write_str(jw, "aria2.tellStatus");
+			json_write_key(jw, "params");
+			json_write_beginarr(jw);
+			/* “secret” */
+			json_write_str(jw, secret_token);
+			/* “gid” */
+			json_write_str(jw, d->gid);
+			/* “keys” */
+			json_write_beginarr(jw);
+
+			json_write_str(jw, "gid");
+
+			if (DOWNLOAD_REMOVED != abs(d->status))
+				json_write_str(jw, "status");
+
+			/* json_write_str(jw, "verifiedLength");
+			json_write_str(jw, "verifyIntegrityPending"); */
+
+			if (NULL == d->name && !d->requested_bittorrent && d->status < 0) {
+				/* if (DOWNLOAD_REMOVED != abs(d->status))
+					json_write_str(jw, "seeder"); */
+
+				json_write_str(jw, "bittorrent");
+				json_write_str(jw, "numPieces");
+				json_write_str(jw, "pieceLength");
+				d->requested_bittorrent = 1;
+			} else if (0 == d->num_files && ((NULL == d->name && d->status >= 0) || is_local)) {
+				/* If “bittorrent.info.name” is empty then
+				 * assign the name of the first file as name.
+				 * */
+				json_write_str(jw, "files");
+			}
+
+			if (view == 'f')
+				if (0 == d->num_files || (d->have != d->total && DOWNLOAD_ACTIVE == abs(d->status)) || d->status < 0)
+					json_write_str(jw, "files");
+
+			if (d->status < 0 && d->total == 0) {
+				json_write_str(jw, "totalLength");
+				json_write_str(jw, "completedLength");
+				json_write_str(jw, "uploadLength");
+				json_write_str(jw, "uploadSpeed");
+			}
+
+			if (NULL == d->belongs_to)
+				json_write_str(jw, "belongsTo");
+
+			if (NULL == d->following)
+				json_write_str(jw, "following");
+
+			switch (abs(d->status)) {
+			case DOWNLOAD_ERROR:
+				if (d->status < 0 || NULL == d->error_message)
+					json_write_str(jw, "errorMessage");
+				break;
+
+			case DOWNLOAD_ACTIVE:
+				if (globalstat.download_speed > 0 ||
+					d->download_speed > 0) {
+					json_write_str(jw, "completedLength");
+					json_write_str(jw, "downloadSpeed");
+				}
+
+				if (globalstat.upload_speed > 0 ||
+					d->upload_speed > 0) {
+					json_write_str(jw, "uploadLength");
+					json_write_str(jw, "uploadSpeed");
+				}
+
+				json_write_str(jw, "connections");
+				break;
+			}
+			d->status = abs(d->status);
+
+			json_write_endarr(jw);
+
+			json_write_endarr(jw);
+			json_write_endobj(jw);
+
+			arg->has_get_peers = 0;
+			arg->has_get_servers = 0;
+			if (NULL != d->name
+			    ? (arg->has_get_peers = ('p' == view))
+			    : (arg->has_get_servers = ('f' == view))) {
+				json_write_beginobj(jw);
+				json_write_key(jw, "methodName");
+				json_write_str(jw, NULL != d->name ? "aria2.getPeers" : "aria2.getServers");
+				json_write_key(jw, "params");
+				json_write_beginarr(jw);
+				/* “secret” */
+				json_write_str(jw, secret_token);
+				/* “gid” */
+				json_write_str(jw, d->gid);
+				json_write_endarr(jw);
+				json_write_endobj(jw);
+			}
+
+			if ((arg->has_get_options = (NULL == d->dir))) {
+				json_write_beginobj(jw);
+				json_write_key(jw, "methodName");
+				json_write_str(jw, "aria2.getOption");
+				json_write_key(jw, "params");
+				json_write_beginarr(jw);
+				/* “secret” */
+				json_write_str(jw, secret_token);
+				/* “gid” */
+				json_write_str(jw, d->gid);
+				json_write_endarr(jw);
+				json_write_endobj(jw);
+			}
+
+		}
+	}
+
+	json_write_endarr(jw); /* }}} */
+
+	json_write_endarr(jw); /* }}} */
+
+	do_rpc();
+}
+
 enum pos_how { POS_SET, POS_CUR, POS_END };
 
 static void
@@ -1282,7 +1579,7 @@ aria_download_repos(struct aria_download *d, int32_t pos, enum pos_how how)
 	json_write_str(jw, POS_HOW[how]);
 	json_write_endarr(jw);
 
-	do_rpc(req);
+	do_rpc();
 }
 
 static void
@@ -1301,7 +1598,7 @@ aria_shutdown(int force)
 	json_write_str(jw, secret_token);
 	json_write_endarr(jw);
 
-	do_rpc(req);
+	do_rpc();
 }
 
 static void
@@ -1320,7 +1617,7 @@ aria_pause_all(int pause, int force)
 	json_write_str(jw, secret_token);
 	json_write_endarr(jw);
 
-	do_rpc(req);
+	do_rpc();
 }
 
 static void
@@ -1341,7 +1638,7 @@ aria_download_pause(struct aria_download *d, int pause, int force)
 	json_write_str(jw, d->gid);
 	json_write_endarr(jw);
 
-	do_rpc(req);
+	do_rpc();
 }
 
 static void
@@ -1364,7 +1661,7 @@ aria_remove_result(struct aria_download *d)
 	}
 	json_write_endarr(jw);
 
-	do_rpc(req);
+	do_rpc();
 }
 
 /* tsl [title] fsl */
@@ -1570,7 +1867,7 @@ aria_download_getfiles(struct aria_download *d)
 	json_write_str(jw, d->gid);
 	json_write_endarr(jw);
 
-	do_rpc(req);
+	do_rpc();
 }
 
 static void
@@ -1890,12 +2187,6 @@ skip_tags:
 	}
 }
 
-static int
-getmainheight(void)
-{
-	return getmaxy(stdscr)/*window height*/ - 1/*status line*/;
-}
-
 static void
 draw_downloads(void)
 {
@@ -2022,7 +2313,7 @@ draw_statusline(void)
 			globalstat.optimize_concurrency ? "O" : "",
 			globalstat.max_concurrency,
 			remote_host, remote_port,
-			ws_fd >= 0 ? "" : " (not connected)");
+			ws_isalive() ? "" : " (not connected)");
 
 	if (NULL != error_message) {
 		addstr(": ");
@@ -2174,64 +2465,6 @@ on_update_all(struct json_node *result, void *arg)
 }
 
 static void
-compute_global(void)
-{
-	struct aria_download **dd = downloads;
-	struct aria_download **const end = &downloads[num_downloads];
-
-	globalstat.have_total = 0;
-	globalstat.upload_total = 0;
-
-	for (; dd < end; ++dd) {
-		struct aria_download const *const d = *dd;
-		globalstat.have_total += d->have;
-		globalstat.upload_total += d->uploaded;
-	}
-
-	/* reset counter */
-	globalstat.compute_total = 0;
-}
-
-static void
-on_periodic(struct json_node *result, struct periodic_arg *arg)
-{
-	if (NULL == result)
-		goto out;
-
-	/* Result is an array. Go to the first element. */
-	result = json_children(result);
-	parse_global_stat(result);
-
-	/* there is some activity so we need to recount soon */
-	if (globalstat.upload_speed > 0 || globalstat.download_speed > 0)
-		compute_global();
-
-	if (globalstat.compute_total > 0)
-		compute_global();
-
-#if 0
-		++globalstat.compute_total;
-	/* activity stopped but there was some before. let's update. */
-	else if (globalstat.compute_total > 0)
-		compute_global();
-
-#endif
-
-	result = json_next(result);
-	if (NULL != result) {
-		parse_downloads(result, arg);
-		on_downloads_change(1);
-	} else {
-		draw_statusline();
-	}
-
-	refresh();
-
-out:
-	free(arg);
-}
-
-static void
 runaction_maychanged(struct aria_download *d)
 {
 	if (NULL != d) {
@@ -2337,44 +2570,6 @@ stripwhite(char *str, size_t *n)
 	return str;
 }
 
-static void
-on_session_info(struct json_node *result, void *arg)
-{
-	char *tmpdir;
-
-	(void)arg;
-
-	if (NULL == result)
-		return;
-
-	(tmpdir = getenv("TMPDIR")) ||
-	(tmpdir = "/tmp");
-
-	snprintf(session_file, sizeof session_file, "%s/aria2t.%s",
-			tmpdir,
-			parse_session_info(result));
-}
-
-static void
-gentmp(void)
-{
-	struct rpc_request *req = new_rpc();
-	if (NULL == req)
-		return;
-	req->handler = on_session_info;
-
-	json_write_key(jw, "method");
-	json_write_str(jw, "aria2.getSessionInfo");
-
-	json_write_key(jw, "params");
-	json_write_beginarr(jw);
-	/* “secret” */
-	json_write_str(jw, secret_token);
-	json_write_endarr(jw);
-
-	do_rpc(req);
-}
-
 static int
 fileout(int must_edit)
 {
@@ -2426,9 +2621,6 @@ on_options(struct json_node *result, struct aria_download *d)
 	if (NULL != d)
 		unref_download(d);
 }
-
-static void
-update_options(struct aria_download *d, int user);
 
 static void
 on_options_change(struct json_node *result, struct aria_download *d)
@@ -2523,7 +2715,7 @@ on_show_options(struct json_node *result, struct aria_download *d)
 
 	free(line);
 
-	do_rpc(req);
+	do_rpc();
 
 out_fclose:
 	fclose(f);
@@ -2533,6 +2725,8 @@ out:
 		unref_download(d);
 }
 
+/* if user requested it, show it. otherwise just update returned values in the
+ * background */
 static void
 update_options(struct aria_download *d, int user)
 {
@@ -2556,7 +2750,7 @@ update_options(struct aria_download *d, int user)
 	}
 	json_write_endarr(jw);
 
-	do_rpc(req);
+	do_rpc();
 	/* update_delta(NULL != d ? 0 : 1); */
 }
 
@@ -2780,7 +2974,7 @@ add_downloads(char cmd)
 
 	req->arg = arg;
 
-	do_rpc(req);
+	do_rpc();
 
 out_fclose:
 	fclose(f);
@@ -2874,215 +3068,7 @@ out_of_loop:
 	json_write_endarr(jw); /* }}} */
 	json_write_endarr(jw);
 
-	do_rpc(req);
-}
-
-static void
-try_connect(void)
-{
-	assert(ws_fd < 0);
-	is_local = 0;
-	if (rpc_connect()) {
-		fds[1].fd = -1;
-		return;
-	}
-
-	oldselidx = -1;
-	/* update global options. mainly for test whether is_local */
-	update_options(NULL, 0);
-
-	fds[1].fd = ws_fd;
-	clear_error_message();
-
-	if (session_file[0])
-		unlink(session_file);
-	gentmp();
-	update_all();
-	update_delta(1); /*for global stat*/
-}
-
-static void
-update_delta(int all)
-{
-	struct rpc_request *req;
-
-	if (ws_fd < 0) {
-		try_connect();
-		return;
-	}
-
-	if (NULL == (req = new_rpc()))
-		return;
-
-	req->handler = (rpc_handler)on_periodic;
-
-	json_write_key(jw, "method");
-	json_write_str(jw, "system.multicall");
-
-	json_write_key(jw, "params");
-	json_write_beginarr(jw); /* {{{ */
-	/* 1st arg: “methods” */
-	json_write_beginarr(jw); /* {{{ */
-
-	/* update unconditionally */{
-		json_write_beginobj(jw);
-		json_write_key(jw, "methodName");
-		json_write_str(jw, "aria2.getGlobalStat");
-		json_write_key(jw, "params");
-		json_write_beginarr(jw);
-		/* “secret” */
-		json_write_str(jw, secret_token);
-		json_write_endarr(jw);
-		json_write_endobj(jw);
-	}
-	if (num_downloads > 0) {
-		struct aria_download **dd;
-		int i, n;
-		struct periodic_arg *arg;
-		if (all && view == VIEWS[1]) {
-			dd = &downloads[topidx];
-			n = getmainheight();
-
-			if ((size_t)(topidx + n) > num_downloads)
-				n = num_downloads - topidx;
-		} else {
-			dd = &downloads[selidx];
-			n = !!num_downloads;
-		}
-
-		if (NULL == (arg = malloc(n * sizeof *arg))) {
-			free_rpc(req);
-			return;
-		}
-		req->arg = arg;
-
-		for (i = 0; i < n; ++i, ++dd, ++arg) {
-			struct aria_download *d = *dd;
-
-			if (d->status < 0)
-				globalstat.compute_total = 1;
-
-			json_write_beginobj(jw);
-			json_write_key(jw, "methodName");
-			json_write_str(jw, "aria2.tellStatus");
-			json_write_key(jw, "params");
-			json_write_beginarr(jw);
-			/* “secret” */
-			json_write_str(jw, secret_token);
-			/* “gid” */
-			json_write_str(jw, d->gid);
-			/* “keys” */
-			json_write_beginarr(jw);
-
-			json_write_str(jw, "gid");
-
-			if (DOWNLOAD_REMOVED != abs(d->status))
-				json_write_str(jw, "status");
-
-			/* json_write_str(jw, "verifiedLength");
-			json_write_str(jw, "verifyIntegrityPending"); */
-
-			if (NULL == d->name && !d->requested_bittorrent && d->status < 0) {
-				/* if (DOWNLOAD_REMOVED != abs(d->status))
-					json_write_str(jw, "seeder"); */
-
-				json_write_str(jw, "bittorrent");
-				json_write_str(jw, "numPieces");
-				json_write_str(jw, "pieceLength");
-				d->requested_bittorrent = 1;
-			} else if (0 == d->num_files && ((NULL == d->name && d->status >= 0) || is_local)) {
-				/* If “bittorrent.info.name” is empty then
-				 * assign the name of the first file as name.
-				 * */
-				json_write_str(jw, "files");
-			}
-
-			if (view == 'f')
-				if (0 == d->num_files || (d->have != d->total && DOWNLOAD_ACTIVE == abs(d->status)) || d->status < 0)
-					json_write_str(jw, "files");
-
-			if (d->status < 0 && d->total == 0) {
-				json_write_str(jw, "totalLength");
-				json_write_str(jw, "completedLength");
-				json_write_str(jw, "uploadLength");
-				json_write_str(jw, "uploadSpeed");
-			}
-
-			if (NULL == d->belongs_to)
-				json_write_str(jw, "belongsTo");
-
-			if (NULL == d->following)
-				json_write_str(jw, "following");
-
-			switch (abs(d->status)) {
-			case DOWNLOAD_ERROR:
-				if (d->status < 0 || NULL == d->error_message)
-					json_write_str(jw, "errorMessage");
-				break;
-
-			case DOWNLOAD_ACTIVE:
-				if (globalstat.download_speed > 0 ||
-					d->download_speed > 0) {
-					json_write_str(jw, "completedLength");
-					json_write_str(jw, "downloadSpeed");
-				}
-
-				if (globalstat.upload_speed > 0 ||
-					d->upload_speed > 0) {
-					json_write_str(jw, "uploadLength");
-					json_write_str(jw, "uploadSpeed");
-				}
-
-				json_write_str(jw, "connections");
-				break;
-			}
-			d->status = abs(d->status);
-
-			json_write_endarr(jw);
-
-			json_write_endarr(jw);
-			json_write_endobj(jw);
-
-			arg->has_get_peers = 0;
-			arg->has_get_servers = 0;
-			if (NULL != d->name
-			    ? (arg->has_get_peers = ('p' == view))
-			    : (arg->has_get_servers = ('f' == view))) {
-				json_write_beginobj(jw);
-				json_write_key(jw, "methodName");
-				json_write_str(jw, NULL != d->name ? "aria2.getPeers" : "aria2.getServers");
-				json_write_key(jw, "params");
-				json_write_beginarr(jw);
-				/* “secret” */
-				json_write_str(jw, secret_token);
-				/* “gid” */
-				json_write_str(jw, d->gid);
-				json_write_endarr(jw);
-				json_write_endobj(jw);
-			}
-
-			if ((arg->has_get_options = (NULL == d->dir))) {
-				json_write_beginobj(jw);
-				json_write_key(jw, "methodName");
-				json_write_str(jw, "aria2.getOption");
-				json_write_key(jw, "params");
-				json_write_beginarr(jw);
-				/* “secret” */
-				json_write_str(jw, secret_token);
-				/* “gid” */
-				json_write_str(jw, d->gid);
-				json_write_endarr(jw);
-				json_write_endobj(jw);
-			}
-
-		}
-	}
-
-	json_write_endarr(jw); /* }}} */
-
-	json_write_endarr(jw); /* }}} */
-
-	do_rpc(req);
+	do_rpc();
 }
 
 static void
@@ -3169,7 +3155,7 @@ aria_download_remove(struct aria_download *d, int force)
 	json_write_str(jw, d->gid);
 	json_write_endarr(jw);
 
-	do_rpc(req);
+	do_rpc();
 }
 
 struct remove_download_arg {
@@ -3224,11 +3210,11 @@ remove_download(struct aria_download *d, int force)
 		json_write_str(jw, d->gid);
 		json_write_endarr(jw);
 
-		do_rpc(req);
+		do_rpc();
 	}
 }
 
-static int
+static void
 stdin_read(void)
 {
 	int ch;
@@ -3279,7 +3265,7 @@ stdin_read(void)
 
 		case 'V':
 			if (!(view = strchr(VIEWS + 1, view)[-1])) {
-				view = VIEWS[ARRAY_LEN(VIEWS) - 2];
+				view = VIEWS[array_len(VIEWS) - 2];
 				oldselidx = -1; /* force redraw */
 			}
 
@@ -3387,8 +3373,7 @@ stdin_read(void)
 			}
 			/* FALLTHROUGH */
 		case 'Z':
-			retcode = EXIT_SUCCESS;
-			return 1;
+			exit(EXIT_SUCCESS);
 
 		case CONTROL('M'):
 			if (isatty(STDOUT_FILENO)) {
@@ -3401,8 +3386,7 @@ stdin_read(void)
 					printf("%s\n", d->gid);
 				}
 
-				retcode = EXIT_SUCCESS;
-				return 1;
+				exit(EXIT_SUCCESS);
 			}
 			break;
 
@@ -3414,13 +3398,13 @@ stdin_read(void)
 
 		case CONTROL('L'):
 			/* try connect if not connected */
-			if (ws_fd < 0)
+			if (!ws_isalive())
 				try_connect();
 			update_all();
 			break;
 
 		case CONTROL('C'):
-			return 1;
+			exit(EXIT_FAILURE);
 
 		default:
 		defaction:
@@ -3436,8 +3420,6 @@ stdin_read(void)
 		}
 
 	}
-
-	return 0;
 }
 
 static void
@@ -3471,13 +3453,63 @@ fill_pairs(void)
 	}
 }
 
+/* múlt héten már próbáltam emailben megérdeklődni, hogy lehet-e */
+
+static void
+_endwin(void)
+{
+	endwin();
+}
+
+static void
+cleanup_session_file(void)
+{
+	if ('\0' != session_file[0]) {
+		unlink(session_file);
+		session_file[0] = '\0';
+	}
+}
+
+void
+on_ws_open(void)
+{
+	fds[1].fd = ws_fileno();
+
+	clear_error_message();
+
+	oldselidx = -1;
+	/* update global options. mainly for test whether is_local */
+	update_options(NULL, 0);
+
+	gentmp();
+	update_all();
+	update_delta(1); /*for global stat*/
+}
+
+void
+on_ws_close(void)
+{
+	if (0 == errno)
+		exit(EXIT_SUCCESS);
+
+	fds[1].fd = -1;
+	is_local = 0;
+
+	clear_rpc_requests();
+
+	memset(&rpc_requests, 0, sizeof rpc_requests);
+
+	clear_downloads();
+	free(downloads), downloads = NULL;
+
+	cleanup_session_file();
+}
+
 int
 main(int argc, char *argv[])
 {
 	sigset_t sigmask;
 	int argi;
-
-	(void)argc;
 
 	/* Needed for ncurses UTF-8. */
 	setlocale(LC_CTYPE, "");
@@ -3485,10 +3517,11 @@ main(int argc, char *argv[])
 	sigemptyset(&sigmask);
 	sigaddset(&sigmask, SIGWINCH);
 	sigaddset(&sigmask, SIGINT);
+	sigaddset(&sigmask, SIGHUP);
+	sigaddset(&sigmask, SIGTERM);
 	sigaddset(&sigmask, SIGQUIT);
 
-	/* (void)sigfillset(&sigmask); */
-	/* Block signals to being able to receive it via `signalfd()` */
+	/* block signals to being able to receive it via signalfd() */
 	sigprocmask(SIG_BLOCK, &sigmask, NULL);
 
 	signal(SIGPIPE, SIG_IGN);
@@ -3514,6 +3547,7 @@ main(int argc, char *argv[])
 	if (load_config())
 		return EXIT_FAILURE;
 
+	atexit(_endwin);
 	newterm(NULL, stderr, stdin);
 	start_color();
 	use_default_colors();
@@ -3543,34 +3577,31 @@ main(int argc, char *argv[])
 	fds[2].events = POLLIN;
 #endif
 
-	try_connect();
-
 	draw_all();
 	refresh();
 
+	atexit(cleanup_session_file);
+	try_connect();
+
 	for (;;) {
 		int const any_activity = globalstat.download_speed + globalstat.upload_speed > 0;
-		int const timeout = ws_fd >= 0 ? (any_activity ? 1250 : 2500) : 5000;
+		int const timeout = ws_isalive() ? (any_activity ? 1250 : 2500) : 5000;
 
-		switch (poll(fds, ARRAY_LEN(fds), timeout)) {
+		switch (poll(fds, array_len(fds), timeout)) {
 		case -1:
 			perror("poll");
-			break;
+			return EXIT_FAILURE;
 
 		case 0:
 			update_delta(1);
 			continue;
 		}
 
-		if (fds[0].revents & POLLIN) {
-			if (stdin_read())
-				break;
-		}
+		if (fds[0].revents & POLLIN)
+			stdin_read();
 
-		if (fds[1].revents & POLLIN) {
-			if (ws_read())
-				break;
-		}
+		if (fds[1].revents & POLLIN)
+			ws_read();
 
 #ifdef __linux__
 		if (fds[2].revents & POLLIN) {
@@ -3585,30 +3616,18 @@ main(int argc, char *argv[])
 					draw_all();
 					refresh();
 					break;
-				case SIGTERM:
 
-					break;
 				case SIGINT:
-					goto exit;
+				case SIGHUP:
+				case SIGTERM:
+				case SIGQUIT:
+					exit(EXIT_SUCCESS);
 				}
 
-			}
-			if (EAGAIN != errno) {
-				assert(0);
-				break;
 			}
 		}
 #else
 		/* sigtimedwait() */
 #endif
 	}
-exit:
-
-	unlink(session_file);
-
-	rpc_shutdown();
-
-	endwin();
-
-	return retcode;
 }

@@ -18,153 +18,60 @@
 #include "program.h"
 #include "websocket.h"
 
-int ws_fd = -1;
-static int ws_fd_sflags;
-
-#define HTTP_SWITCHING_PROTOCOLS "HTTP/1.1 101 "
-
-static uint8_t hdrlen;
-static unsigned char hdrbuf[2 + 8 + 4];
-static char *msgbuf = NULL;
-static size_t msgsize = 0;
-static size_t msgallocsize = 0;
-static size_t msglen = 0;
-
 #define container_of(ptr, type, member) (type *)((char *)ptr - offsetof(type, member))
 #define array_len(arr) (sizeof(arr) / sizeof *(arr))
 
-static int ws_http_wait_upgrade(void);
-static int ws_http_upgrade(char const *host, in_port_t port);
+static int ws = -1;
 
-static void
-ws_strerror(void)
+#define BUFPAD 6
+static uint64_t buflen;
+static uint64_t bufsiz;
+static char *_buf;
+#define buf (_buf + BUFPAD)
+
+int
+ws_fileno(void)
 {
-	free(error_message), error_message = strdup(strerror(errno));
+	return ws;
 }
 
 int
-ws_connect(char const *host, in_port_t port)
+ws_isalive(void)
 {
-	struct addrinfo hints;
-	struct addrinfo *addrs, *p;
-	int ret;
-	char port_str[sizeof "65536"];
+	return 0 <= ws;
+}
 
-	memset(&hints, 0, sizeof hints);
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_STREAM;
-	hints.ai_protocol = IPPROTO_TCP;
-	hints.ai_flags = 0;
+static int
+expect_http_upgrade(void)
+{
+	for (;;) {
+		ssize_t res;
 
-	sprintf(port_str, "%hu", port);
+		if (0 <= (res = read(ws, buf, bufsiz - buflen - 1/*nil*/))) {
+			char *end;
 
-	if ((ret = getaddrinfo(host, port_str, &hints, &addrs))) {
-		free(error_message);
-		if (EAI_SYSTEM != ret)
-			error_message = strdup(gai_strerror(ret));
-		else
-			error_message = strdup(strerror(errno));
-		return 1;
-	}
+			buflen += (size_t)res;
 
-	ws_fd = -1;
-	for (p = addrs; NULL != p; p = p->ai_next) {
-		ws_fd = socket(p->ai_family,
-				p->ai_socktype
-#ifdef __linux
-					| SOCK_CLOEXEC,
-#endif
-				p->ai_protocol);
-		if (-1 == ws_fd)
-			continue;
+#define HTTP_SWITCHING_PROTOCOLS "HTTP/1.1 101 "
+			if (sizeof HTTP_SWITCHING_PROTOCOLS - 1 <= buflen) {
+				if (0 != memcmp(buf, HTTP_SWITCHING_PROTOCOLS, sizeof HTTP_SWITCHING_PROTOCOLS - 1))
+					return -1;
+			}
 
-#ifndef __linux__
-		{
-			int flags = fcntl(ws_fd, F_GETFD);
-			flags |= O_CLOEXEC;
-			(void)fcntl(ws_fd, F_SETFD, flags);
+			buf[buflen] = '\0';
+			if (NULL != (end = strstr(buf, "\r\n\r\n"))) {
+				buflen -= ((end + 4) - buf);
+				return 0;
+			}
 		}
-#endif
 
-		ws_fd_sflags = fcntl(ws_fd, F_GETFL);
-
-		if (0 == connect(ws_fd, p->ai_addr, p->ai_addrlen))
-			break;
-
-		close(ws_fd);
 	}
 
-	freeaddrinfo(addrs);
-
-	if (ws_fd == -1) {
-		ws_strerror();
-		return 1;
-	}
-
-	if (ws_http_upgrade(host, port)) {
-		free(error_message), error_message = strdup("connection refused");
-		return 1;
-	}
-
-	return 0;
 }
 
-int ws_write(char const *msg, size_t msglen)
+static int
+http_upgrade(char const *host, in_port_t port)
 {
-	struct iovec iov[2];
-	unsigned char hdr[6 + 2 + 8 + 4] __attribute__((aligned(8)));
-	unsigned char *p = hdr + 6;
-
-	iov[0].iov_base = p;
-	iov[1].iov_base = (char *)msg;
-	iov[1].iov_len = msglen;
-
-	/* Header. */
-	p[0] = 0x81U/*fin+text*/;
-	p[1] = 0x80U/*mask*/;
-	/* Payload length. */
-	if (msglen < 126) {
-		p[1] |= msglen;
-		p += 2;
-	} else if (msglen <= UINT16_MAX) {
-		p[1] |= 126;
-		*(uint16_t *)(p += 2) = htobe16((uint16_t)msglen);
-		p += sizeof(uint16_t);
-	} else {
-		p[1] |= 127;
-		*(uint64_t *)(p += 2) = htobe64((uint64_t)msglen);
-		p += sizeof(uint64_t);
-	}
-	/* Mask. */
-	memset(p, 0, 4);
-	p += 4;
-
-	iov[0].iov_len = p - (hdr + 6);
-
-	while (-1 == writev(ws_fd, iov, array_len(iov))) {
-		if (EINTR == errno)
-			continue;
-		ws_fd = -1;
-		return -1;
-	}
-
-	return 0;
-}
-
-int writeall(void const *buf, size_t nbyte) {
-	while (-1 == write(ws_fd, buf, nbyte)) {
-		if (EINTR == errno)
-			continue;
-		ws_fd = -1;
-		return -1;
-	}
-
-	return 0;
-}
-
-static int ws_http_upgrade(char const *host, in_port_t port)
-{
-	char buf[147 + 256];
 	size_t len;
 
 	len = (size_t)sprintf(buf,
@@ -177,245 +84,194 @@ static int ws_http_upgrade(char const *host, in_port_t port)
 "\r\n",
 		host, port);
 
-	if (writeall(buf, len))
-		return 1;
-
-	return ws_http_wait_upgrade();
-}
-
-
-static int ws_http_wait_upgrade(void) {
-	unsigned nstatus = 0;
-	unsigned nchr = 0;
-
-	for (;;) {
-		char buf[1024];
-		ssize_t len = 0;
-		unsigned n;
-		char *p;
-
-	read_more:
-		while (-1 == (len = read(ws_fd, buf, sizeof buf))) {
-			if (EINTR == errno)
-				continue;
-			ws_strerror();
-			ws_fd = -1;
-			return -1;
-		}
-		if (0 == len)
-			return 0;
-
-		n = strlen(HTTP_SWITCHING_PROTOCOLS) - nstatus;
-		if (n > len)
-			n = len;
-		if (0 != memcmp(buf, HTTP_SWITCHING_PROTOCOLS + nstatus, n))
-			return 1;
-		nstatus += n;
-
-		for (p = buf;;++p) {
-			switch (nchr) {
-			case 0:
-				if (NULL == (p = memchr(p, '\r', len - (p - buf))))
-					goto read_more;
-				nchr = 1;
-				break;
-			case 4: {
-				len -= p - buf;
-				if (len > 0)
-					assert(0);
-				return 0;
-			}
-			default:
-				if (p < buf + len) {
-					if (*p == "\r\n\r\n"[nchr])
-						++nchr;
-					else
-						nchr = 0;
-				} else {
-					goto read_more;
-				}
-				break;
-			}
-		}
-	}
-}
-
-int
-ws_shutdown(void)
-{
-	int ret;
-
-	if ((ret = writeall("\x80\x8a", 2)))
-		return ret;
-	shutdown(ws_fd, SHUT_WR);
-
-	return ret;
-}
-
-static int ws_process_chunk(char *buf, size_t len) {
-	char *p = buf;
-	size_t remain = len;
-
-	do {
-		int need_more;
-		size_t need;
-
-		/* printf("remain=%d; hdrlen=%d\n", (int)len, hdrlen); */
-		if (hdrlen != sizeof hdrbuf) {
-			if (hdrlen >= 2) {
-			parse_hdr:
-				/* printf("header: %x%x\n", hdrbuf[0], hdrbuf[1]); */
-				assert(!(hdrbuf[1] & 0x80));
-				switch (hdrbuf[1] & 0x7f) {
-				default:
-					need = 2;
-					break;
-				case 126:
-					need = 2 + sizeof(uint16_t);
-					break;
-				case 127:
-					need = 2 + sizeof(uint64_t);
-					break;
-				}
-			} else {
-				need = 2;
-			}
-
-			need -= hdrlen;
-			if ((need_more = remain < need))
-				need = remain;
-			/* printf("new hdrlen=%d need=%d need_more=%d remain=%d\n", hdrlen, (int)need, need_more, (int)remain); */
-			memcpy(&hdrbuf[hdrlen], p, need);
-			p += need, remain -= need;
-
-			if (!need_more) {
-				uint8_t payloadlen8;
-				uint64_t payloadlen;
-
-				if (hdrlen < 2) {
-					hdrlen = 2;
-					goto parse_hdr;
-				}
-
-				payloadlen8 = hdrbuf[1] & 0x7f;
-				switch (payloadlen8) {
-				default:
-					payloadlen = payloadlen8;
-					break;
-				case 126: {
-					uint16_t payloadlen16_be;
-					memcpy(&payloadlen16_be, &hdrbuf[2], sizeof payloadlen16_be);
-					payloadlen = be16toh(payloadlen16_be);
-				}
-					break;
-				case 127: {
-					uint64_t payloadlen64_be;
-					memcpy(&payloadlen64_be, &hdrbuf[2], sizeof payloadlen64_be);
-					payloadlen = be64toh(payloadlen64_be);
-				}
-					break;
-				}
-
-				/* printf("frame hdr parsed; hdrlen=%d paylen=%d %x %x\n", hdrlen, (int)payloadlen, hdrbuf[0], hdrbuf[1]); */
-				if (hdrbuf[1] & 0x80)
-					assert(!"mask not expected");
-
-				assert(msgsize == msglen);
-				msgsize = msglen + payloadlen;
-				if (msgsize > msgallocsize) {
-					void *p;
-					p = realloc(msgbuf, msgsize);
-					if (NULL == p) {
-						ws_shutdown();
-						return -1;
-					}
-					msgbuf = p;
-					msgallocsize = msgsize;
-				}
-
-				hdrlen = sizeof hdrbuf;
-			} else {
-				hdrlen += need;
-			}
-		}
-
-		if (hdrlen == sizeof hdrbuf) {
-			need = msgsize - msglen;
-			/* printf("msg len=%d size=%d; readable=%d\n", (int)msglen, (int)msgsize, (int)remain); */
-			if ((need_more = remain < need))
-				need = remain;
-			/* printf("read=+%d\n", (int)need); */
-
-			memcpy(msgbuf + msglen, p, need);
-			msglen += need, p += need, remain -= need;
-
-			if (!need_more) {
-				int err;
-				/* printf("msg !!! %*s \n", (int)msglen, msgbuf); */
-
-				switch (hdrbuf[0] & 0x7f) {
-				case 0x1:
-					err = on_ws_message(msgbuf, msglen);
-					break;
-
-				case 0x8:
-					err = ws_shutdown();
-					break;
-
-				default:
-					/* printf("type=%x\n", hdrbuf[0]); */
-					assert(0);
-				}
-				msgsize = 0;
-				msglen = 0;
-				hdrlen = 0;
-				if (err)
-					return err;
-			}
-		}
-	} while (remain > 0);
-
-	return 0;
-}
-
-int ws_read(void)
-{
-	int err = 0;
-
-	if (fcntl(ws_fd, F_SETFL, ws_fd_sflags | O_NONBLOCK)) {
-		ws_strerror();
+	if (write(ws, buf, len) < 0)
 		return -1;
-	}
 
-	for (;;) {
-		char buf[8192];
-		ssize_t len;
-
-		if (-1 == (len = read(ws_fd, buf, sizeof buf))) {
-			if (EAGAIN != errno) {
-				(void)ws_shutdown();
-				ws_fd = -1;
-
-				err = -1;
-				ws_strerror();
-			}
-			break;
-		}
-		if (len == 0) {
-			ws_fd = -1;
-			err = -1;
-			break;
-		}
-
-		if ((err = ws_process_chunk(buf, (size_t)len)))
-			break;
-	}
-
-	if (fcntl(ws_fd, F_SETFL, ws_fd_sflags)) {
-		ws_strerror();
-		err = -1;
-	}
-
-	return err;
+	return expect_http_upgrade();
 }
-/* vi:set noet: */
+
+void
+ws_connect(char const *host, in_port_t port)
+{
+	struct addrinfo hints;
+	struct addrinfo *addrs, *p;
+	int ret;
+	char portstr[sizeof "65536"];
+
+	assert("not connected" && 0 > ws);
+
+	memset(&hints, 0, sizeof hints);
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_protocol = IPPROTO_TCP;
+	hints.ai_flags = 0;
+
+	sprintf(portstr, "%hu", port);
+
+	if ((ret = getaddrinfo(host, portstr, &hints, &addrs))) {
+		free(error_message);
+		if (EAI_SYSTEM != ret)
+			error_message = strdup(gai_strerror(ret));
+		else
+			error_message = strdup(strerror(errno));
+		return;
+	}
+
+	ws = -1;
+	for (p = addrs; NULL != p; p = p->ai_next) {
+		ws = socket(p->ai_family,
+				p->ai_socktype
+#ifdef SOCK_CLOEXEC
+				| SOCK_CLOEXEC,
+#endif
+				p->ai_protocol);
+		if (-1 == ws)
+			continue;
+
+#ifndef SOCK_CLOEXEC
+		{
+			int flags = fcntl(ws, F_GETFD);
+			flags |= O_CLOEXEC;
+			(void)fcntl(ws, F_SETFD, flags);
+		}
+#endif
+
+		if (0 == connect(ws, p->ai_addr, p->ai_addrlen))
+			break;
+
+		close(ws);
+	}
+
+	freeaddrinfo(addrs);
+
+	buflen = 0;
+	_buf = realloc(_buf, BUFPAD + (bufsiz = BUFSIZ));
+
+	if (ws < 0) {
+		free(error_message), error_message = strdup(strerror(errno));
+	} else if (http_upgrade(host, port)) {
+		close(ws), ws = -1;
+		free(error_message), error_message = strdup("connection refused");
+	} else {
+		on_ws_open();
+	}
+}
+
+void
+ws_write(char const *msg, size_t msglen)
+{
+	struct iovec iov[2];
+	unsigned char hdr[6 + 2 + 8 + 4] __attribute__((aligned(8)));
+	unsigned char *p = hdr + 6;
+
+	iov[0].iov_base = p;
+	iov[1].iov_base = (char *)msg;
+	iov[1].iov_len = msglen;
+
+	/* header */
+	p[0] = 0x81U/*fin+text*/;
+	p[1] = 0x80U/*mask*/;
+	/* payload length */
+	if (msglen < 126) {
+		p[1] |= msglen;
+		p += 2;
+	} else if (msglen <= UINT16_MAX) {
+		p[1] |= 126;
+		*(uint16_t *)(p += 2) = htobe16((uint16_t)msglen);
+		p += sizeof(uint16_t);
+	} else {
+		p[1] |= 127;
+		*(uint64_t *)(p += 2) = htobe64((uint64_t)msglen);
+		p += sizeof(uint64_t);
+	}
+	/* mask; we use 0, so XOR-ing is fast and easy */
+	memset(p, 0, sizeof(uint32_t));
+	p += sizeof(uint32_t);
+
+	iov[0].iov_len = p - (hdr + 6);
+
+	while (-1 == writev(ws, iov, array_len(iov))) {
+		if (EINTR == errno)
+			continue;
+		on_ws_close();
+		close(ws), ws = -1;
+		return;
+	}
+}
+
+/* process all websocket messages (frames) found in buffer */
+static void
+ws_process_frames(void)
+{
+	for (;;) {
+		uint64_t payloadlen, framelen;
+		uint8_t hdrlen;
+
+		if (buflen <= 2)
+			return;
+
+		/* server->client must not mask */
+		switch (buf[1]) {
+		default:
+			hdrlen = 2;
+			payloadlen = buf[1];
+			break;
+
+		case 126:
+			if (buflen <= (hdrlen = 2 + sizeof(uint16_t)))
+				return;
+			payloadlen = be16toh(*(uint16_t *)(buf + 2));
+			break;
+
+		case 127:
+			if (buflen <= (hdrlen = 2 + sizeof(uint64_t)))
+				return;
+			payloadlen = be64toh(*(uint64_t *)(buf + 2));
+			break;
+		}
+
+		framelen = hdrlen + payloadlen;
+		/* do we have the whole frame in buffer? */
+		if (framelen <= buflen) {
+			switch ((unsigned char)buf[0]) {
+			case 0x81U: /* fin := 1, rsv{1,2,3} := 0, text frame */
+				on_ws_message(buf + hdrlen, payloadlen);
+				buflen -= framelen;
+				memmove(buf, buf + framelen, buflen);
+				break;
+
+			default:
+				assert(!"unexpected websocket frame");
+			}
+		} else {
+			/* maybe we have to realloc for the next read? */
+			if (bufsiz < framelen) {
+				char *p;
+
+				if (NULL == (p = realloc(_buf, BUFPAD + framelen)))
+					return;
+				_buf = p;
+				bufsiz = framelen;
+			}
+
+			return;
+		}
+	}
+}
+
+void
+ws_read(void)
+{
+	ssize_t res;
+
+again:
+	if (0 < (res = read(ws, buf + buflen, bufsiz - buflen))) {
+		buflen += (size_t)res;
+		ws_process_frames();
+	} else if (EINTR == errno) {
+		goto again;
+	} else {
+		on_ws_close();
+		close(ws), ws = -1;
+	}
+}

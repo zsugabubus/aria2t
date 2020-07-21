@@ -6,7 +6,6 @@ minimal but complete.
 ## Features
 
 * **Multiple views.** Downloads, files, peers.
-* **Event driven.** TUI never lags because of slow Internet.
 * **Efficient.** Requests and updates only what needed.
 * **Scriptable.** Bind an executable to any key.
 * **Batteries included.** Most RPC commands covered.
