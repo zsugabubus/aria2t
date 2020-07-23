@@ -36,7 +36,11 @@ They always receive the following arguments:
 .IP 1.
 Selection GID (or empty if there are none).
 .IP 2.
-Path to the session file, that contains TAB-separated information about selection.
+Path to the
+.I session file
+, that contains
+.BR TAB -separated
+information about selection.
 .PP
 If an action terminates with failure, in-progress operation is cancelled. When
 an actions does not exist, either a default, builtin action is executed or it
@@ -90,22 +94,33 @@ Pause selected/all download(s).
 .
 .TP
 .B a, A, +
-Add download(s) from file (one per line). If there are no associated actions,
-opens file for editing. Lastly added download gets selected. Lines that could
-not be added are get written back to the file.
+Add download(s) from
+.I session file
+(one per line).
+Open
+.I session file
+for editing unless there are associated actions. Select lastly added download.
 .sp
-Lines ending with \fB.torrent\fR and \fB.meta4\fR or \fB.metalink\fR are treated
-like Torrent and Metalink files on the local filesystem. In every other
-case and if upload fails for some reason (e.g. file not readable or it is really just
-an URI that ends with one of these extensions) is treated like an URI.
+By default, lines are treated like an URI. When aria2 is remote, lines ending with
+.BR .torrent \ and\  .meta4 \ or\  .metalink
+and referring to a readable file on the local filesystem are treated like
+Torrent and Metalink files, respectively.
 .sp
-Downloads inserted after the selection in the queue.
+Insert downloads after the selection in the queue.
+.sp
+Delete only lines that were successfully added to aria2; keep
+failed ones untouched.
 .
 .TP
 .B i, I
-Show selected download/global options in a TAB-separated key-value format. If
-there are no associated actions, opens session file for viewing. To change
-an option edit the file.
+Write selected download/global options in a
+.BR TAB -separated
+key-value format into the
+.IR "session file" .
+Open
+.I session file
+for viewing unless there are associated actions.
+Edit the file to change options.
 .
 .TP
 .B D, DEL
@@ -205,21 +220,26 @@ Default:
 .
 .TP
 .B VISUAL, EDITOR
-Used program for opening session file for editing.
+Used program for opening
+.I session file
+for editing.
 .sp
 Default:
 .BR vi (1).
 .
 .TP
 .B PAGER
-Used program for opening session file for viewing.
+Used program for opening
+.I session file
+for viewing.
 .sp
 Default:
 .BR less (1).
 .
 .TP
 .B TMPDIR
-Where to create session file.
+Where to create
+.I session file.
 .sp
 Default:
 .IR /tmp .

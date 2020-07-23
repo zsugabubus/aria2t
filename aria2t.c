@@ -50,7 +50,7 @@ static int oldselidx;
 static int selidx = 0;
 static int topidx = 0;
 
-static int is_local = 0; /* server runs on local host */
+static int is_local; /* server runs on local host */
 
 static char *select_gid;
 static char *select_file;
@@ -625,35 +625,17 @@ clear_rpc_requests(void)
 static void
 update_options(struct aria_download *d, int user);
 
-static char *
-parse_session_info(struct json_node *node)
-{
-	/* First kv-pair.  */
-	node = json_children(node);
-	do {
-		if (0 == strcmp(node->key, "sessionId"))
-			return node->val.str;
-	} while (NULL != (node = json_next(node)));
-
-	return NULL;
-}
-
 static void
-on_session_info(struct json_node *result, void *arg)
+parse_session_info(struct json_node *result)
 {
 	char *tmpdir;
-
-	(void)arg;
-
-	if (NULL == result)
-		return;
 
 	(tmpdir = getenv("TMPDIR")) ||
 	(tmpdir = "/tmp");
 
 	snprintf(session_file, sizeof session_file, "%s/aria2t.%s",
 			tmpdir,
-			parse_session_info(result));
+			json_get(result, "sessionId")->val.str);
 }
 
 static void
@@ -664,33 +646,14 @@ do_rpc(void)
 }
 
 static void
-gentmp(void)
-{
-	struct rpc_request *req;
-
-	session_file[0] = '\0';
-
-	if (NULL == (req = new_rpc()))
-		return;
-	req->handler = on_session_info;
-
-	json_write_key(jw, "method");
-	json_write_str(jw, "aria2.getSessionInfo");
-
-	json_write_key(jw, "params");
-	json_write_beginarr(jw);
-	/* “secret” */
-	json_write_str(jw, secret_token);
-	json_write_endarr(jw);
-
-	do_rpc();
-}
-
-static void
 update_tags(struct aria_download *d)
 {
 	ssize_t siz;
 	char *p;
+
+	/* do not try read tags if aria2 is remote */
+	if (!is_local)
+		return;
 
 	if (NULL == d->tags)
 		d->tags = malloc(255 + 1);
@@ -712,8 +675,6 @@ update_tags(struct aria_download *d)
 	goto no_tags;
 
 has_tags:
-	is_local = 1;
-
 	d->tags[siz] = '\0';
 	/* transform tags: , -> ' ' */
 	for (p = d->tags; NULL != (p += strcspn(p, "\t\r\n")) && '\0' != *p; ++p)
@@ -2303,12 +2264,13 @@ draw_statusline(void)
 	move(y, 0);
 	attr_set(A_NORMAL, 0, NULL);
 
-	printw("[%c %4d/%-4d] [%4d/%4d|%4d] [%s%s%dc] @ %s:%d%s",
+	printw("[%c %4d/%-4d] [%4d/%4d|%4d] [%s%s%s%dc] @ %s:%d%s",
 			view,
 			num_downloads > 0 ? selidx + 1 : 0, num_downloads,
 			globalstat.num_active,
 			globalstat.num_waiting,
 			globalstat.num_stopped,
+			is_local ? "L" : "",
 			globalstat.save_session ? "S" : "",
 			globalstat.optimize_concurrency ? "O" : "",
 			globalstat.max_concurrency,
@@ -2901,9 +2863,9 @@ add_downloads(char cmd)
 		if (0 == linelen)
 			continue;
 
-		if (ISSUFFIX(".torrent"))
+		if (ISSUFFIX(".torrent") && !is_local)
 			kind = kind_torrent;
-		else if (ISSUFFIX(".meta4") || ISSUFFIX(".metalink"))
+		else if ((ISSUFFIX(".meta4") || ISSUFFIX(".metalink")) && !is_local)
 			kind = kind_metalink;
 		else
 			kind = kind_uri;
@@ -3470,6 +3432,72 @@ cleanup_session_file(void)
 	}
 }
 
+static void
+on_remote_info(struct json_node *result, void *arg)
+{
+	struct json_node *node;
+
+	(void)arg;
+
+	if (NULL == result)
+		return;
+
+	result = json_children(result);
+	node = json_children(result);
+	parse_session_info(node);
+
+	result = json_next(result);
+	node = json_children(result);
+	parse_options(node, (parse_options_cb)parse_option, NULL);
+
+	/* we have is_local correctly set, so we can start requesting downloads */
+
+	update_all();
+}
+
+static void
+remote_info(void)
+{
+	struct rpc_request *req;
+
+	if (NULL == (req = new_rpc()))
+		return;
+	req->handler = on_remote_info;
+
+	json_write_key(jw, "method");
+	json_write_str(jw, "system.multicall");
+
+	json_write_key(jw, "params");
+	json_write_beginarr(jw);
+	/* 1st arg: “methods” */
+	json_write_beginarr(jw); /* {{{ */
+
+	json_write_beginobj(jw);
+	json_write_key(jw, "methodName");
+	json_write_str(jw, "aria2.getSessionInfo");
+	json_write_key(jw, "params");
+	json_write_beginarr(jw);
+	/* “secret” */
+	json_write_str(jw, secret_token);
+	json_write_endarr(jw);
+	json_write_endobj(jw);
+
+	json_write_beginobj(jw);
+	json_write_key(jw, "methodName");
+	json_write_str(jw, "aria2.getGlobalOption");
+	json_write_key(jw, "params");
+	json_write_beginarr(jw);
+	/* “secret” */
+	json_write_str(jw, secret_token);
+	json_write_endarr(jw);
+	json_write_endobj(jw);
+
+	json_write_endarr(jw);
+	json_write_endarr(jw);
+
+	do_rpc();
+}
+
 void
 on_ws_open(void)
 {
@@ -3478,12 +3506,9 @@ on_ws_open(void)
 	clear_error_message();
 
 	oldselidx = -1;
-	/* update global options. mainly for test whether is_local */
-	update_options(NULL, 0);
 
-	gentmp();
-	update_all();
-	update_delta(1); /*for global stat*/
+	is_local = 0;
+	remote_info();
 }
 
 void
@@ -3493,7 +3518,6 @@ on_ws_close(void)
 		exit(EXIT_SUCCESS);
 
 	fds[1].fd = -1;
-	is_local = 0;
 
 	clear_rpc_requests();
 
