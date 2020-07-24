@@ -1586,6 +1586,55 @@ aria_pause_all(int pause, int force)
 }
 
 static void
+remove_download_at(struct aria_download **dd)
+{
+	struct aria_download *d = *dd;
+
+	*dd = downloads[--num_downloads];
+
+	if (longest_tag == d) {
+		tag_col_width = 0;
+		longest_tag = NULL;
+	}
+
+	unref_download(d);
+}
+
+static void
+on_remove_result(struct json_node *result, struct aria_download *d)
+{
+	if (NULL != result) {
+		struct aria_download **dd;
+
+		if (NULL != d) {
+			if (NULL != (dd = find_download(d)))
+				remove_download_at(dd);
+		} else {
+			struct aria_download **end = &downloads[num_downloads];
+			for (dd = downloads; dd < end;) {
+				switch (abs((*dd)->status)) {
+				case DOWNLOAD_COMPLETE:
+				case DOWNLOAD_ERROR:
+				case DOWNLOAD_REMOVED:
+					remove_download_at(dd);
+					--end;
+					break;
+
+				default:
+					++dd;
+				}
+			}
+		}
+
+		on_downloads_change(1);
+		refresh();
+	}
+
+	if (NULL != d)
+		unref_download(d);
+}
+
+static void
 aria_download_pause(struct aria_download *d, int pause, int force)
 {
 	struct rpc_request *req = new_rpc();
@@ -1612,6 +1661,9 @@ aria_remove_result(struct aria_download *d)
 	struct rpc_request *req = new_rpc();
 	if (NULL == req)
 		return;
+
+	req->handler = (rpc_handler)on_remove_result;
+	req->arg = NULL != d ? ref_download(d) : NULL;
 
 	json_write_key(jw, "method");
 	json_write_str(jw, NULL != d ? "aria2.removeDownloadResult" : "aria2.purgeDownloadResult");
@@ -3074,23 +3126,16 @@ clear_file(void)
 static void
 on_download_remove(struct json_node *result, struct aria_download *d)
 {
-	struct aria_download **dd;
-
 	if (NULL != result) {
+		struct aria_download **dd;
+
 		write_file();
 		(void)run_action(d, "D");
 		clear_file();
 
 		/* download removed */
 		if (NULL != (dd = find_download(d))) {
-			*dd = downloads[--num_downloads];
-
-			if (longest_tag == d) {
-				tag_col_width = 0;
-				longest_tag = NULL;
-			}
-
-			unref_download(d);
+			remove_download_at(dd);
 
 			on_downloads_change(1);
 			refresh();
