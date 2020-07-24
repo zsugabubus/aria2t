@@ -1241,18 +1241,22 @@ parse_downloads(struct json_node *result, struct periodic_arg *arg)
 
 		if (arg->has_get_peers || arg->has_get_servers) {
 			result = json_next(result);
-			assert(result);
-
-			node = json_children(result);
-			(arg->has_get_peers ? parse_peers : parse_servers)(d, node);
+			if (json_obj == json_type(result)) {
+				error_handler(result);
+			} else {
+				node = json_children(result);
+				(arg->has_get_peers ? parse_peers : parse_servers)(d, node);
+			}
 		}
 
 		if (arg->has_get_options) {
 			result = json_next(result);
-			assert(result);
-
-			node = json_children(result);
-			parse_options(node, (parse_options_cb)parse_option, d);
+			if (json_obj == json_type(result)) {
+				error_handler(result);
+			} else {
+				node = json_children(result);
+				parse_options(node, (parse_options_cb)parse_option, d);
+			}
 		}
 
 		some_insufficient |= download_insufficient(d);
