@@ -392,9 +392,9 @@ find_download(struct aria_download const *d)
 }
 
 static struct aria_download **
-find_download_byfile(char const *filepath)
+find_download_byfile(char const *filepath, struct aria_download **start)
 {
-	struct aria_download **dd = downloads;
+	struct aria_download **dd = NULL != start ? start : downloads;
 	struct aria_download **const end = &downloads[num_downloads];
 	size_t const len = strlen(filepath);
 
@@ -416,7 +416,7 @@ find_download_byfile(char const *filepath)
 }
 
 static struct aria_download **
-get_download_bygid(char const *gid)
+find_download_bygid(char const *gid, int create)
 {
 	struct aria_download *d, **dd = downloads;
 	struct aria_download **const end = &downloads[num_downloads];
@@ -425,9 +425,13 @@ get_download_bygid(char const *gid)
 		if (0 == memcmp((*dd)->gid, gid, sizeof (*dd)->gid))
 			return dd;
 
+	if (!create)
+		return NULL;
+
 	if (NULL == (d = new_download()))
 		return NULL;
 
+	assert(strlen(gid) == sizeof d->gid - 1);
 	memcpy(d->gid, gid, sizeof d->gid);
 
 	dd = &downloads[num_downloads - 1];
@@ -499,7 +503,7 @@ static void
 on_notification(char const *method, struct json_node *event)
 {
 	char *const gid = json_get(event, "gid")->val.str;
-	struct aria_download **dd = get_download_bygid(gid);
+	struct aria_download **dd = find_download_bygid(gid, 1);
 	struct aria_download *d;
 	int newstatus;
 
@@ -1089,10 +1093,10 @@ d->local = strto##type(field->val.str, NULL, 10);
 		else_if_FIELD(num_connections, "connections", ul)
 #undef else_if_FIELD
 		else if (0 == strcmp(field->key, "following")) {
-			struct aria_download **dd = get_download_bygid(field->val.str);
+			struct aria_download **dd = find_download_bygid(field->val.str, 1);
 			d->following = NULL != dd ? *dd : NULL;
 		} else if (0 == strcmp(field->key, "belongsTo")) {
-			struct aria_download **dd = get_download_bygid(field->val.str);
+			struct aria_download **dd = find_download_bygid(field->val.str, 1);
 			assert(!"eeeeeeeee");
 			d->belongs_to = NULL != dd ? *dd : NULL;
 		} else if (0 == strcmp(field->key, "errorMessage")) {
@@ -1217,7 +1221,7 @@ parse_downloads(struct json_node *result, struct periodic_arg *arg)
 		}
 
 		node = json_children(result);
-		if (NULL == (dd = get_download_bygid(json_get(node, "gid")->val.str))) {
+		if (NULL == (dd = find_download_bygid(json_get(node, "gid")->val.str, 1))) {
 		skip:
 			if (arg->has_get_peers || arg->has_get_servers)
 				result = json_next(result);
@@ -2246,7 +2250,7 @@ on_downloads_change(int stickycurs)
 
 		/* move selection if download moved */
 		if (stickycurs && 0 != memcmp(selgid, downloads[selidx]->gid, sizeof selgid)) {
-			struct aria_download **dd = get_download_bygid(selgid);
+			struct aria_download **dd = find_download_bygid(selgid, 1);
 
 			assert("selection disappeared after sorting" && NULL != dd);
 			selidx = dd - downloads;
@@ -2418,7 +2422,7 @@ on_update_all(struct json_node *result, void *arg)
 	 * does not exist */
 	if (NULL != select_gid) {
 		struct aria_download **dd;
-		if (NULL != (dd = get_download_bygid(select_gid)))
+		if (NULL != (dd = find_download_bygid(select_gid, 1)))
 			strncpy((*dd)->gid, select_gid, sizeof (*dd)->gid - 1);
 	}
 
@@ -2465,7 +2469,7 @@ on_update_all(struct json_node *result, void *arg)
 	if (NULL != select_file) {
 		struct aria_download **dd;
 
-		if (NULL != (dd = find_download_byfile(select_file))) {
+		if (NULL != (dd = find_download_byfile(select_file, NULL))) {
 			view = 'f';
 			/* update view immediately */
 			some_insufficient = 1;
@@ -2820,11 +2824,11 @@ on_downloads_add(struct json_node *result, struct downloads_add_arg *arg)
 
 			if (json_str == json_type(gid)) {
 				/* single GID returned */
-				if (NULL != (dd = get_download_bygid(gid->val.str)))
+				if (NULL != (dd = find_download_bygid(gid->val.str, 1)))
 					selidx = dd - downloads;
 			} else {
 				/* get first GID of the array */
-				if (NULL != (dd = get_download_bygid(json_children(gid)->val.str)))
+				if (NULL != (dd = find_download_bygid(json_children(gid)->val.str, 1)))
 					selidx = dd - downloads;
 			}
 		}
@@ -3256,7 +3260,7 @@ stdin_read(void)
 			if (num_downloads > 0) {
 				struct aria_download *d = downloads[selidx]->following;
 				if (NULL != d) {
-					selidx = get_download_bygid(d->gid) - downloads;
+					selidx = find_download_bygid(d->gid, 1) - downloads;
 					draw_cursor();
 					refresh();
 				}
