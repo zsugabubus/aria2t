@@ -2863,9 +2863,9 @@ add_downloads(char cmd)
 		if (0 == linelen)
 			continue;
 
-		if (ISSUFFIX(".torrent") && !is_local)
+		if (ISSUFFIX(".torrent"))
 			kind = kind_torrent;
-		else if ((ISSUFFIX(".meta4") || ISSUFFIX(".metalink")) && !is_local)
+		else if ((ISSUFFIX(".meta4") || ISSUFFIX(".metalink")))
 			kind = kind_metalink;
 		else
 			kind = kind_uri;
