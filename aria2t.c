@@ -1757,6 +1757,7 @@ draw_peer(struct aria_download const *d, size_t i, int *y)
 	}
 	addstr("  ");
 	addstr(p->peerid);
+	clrtoeol();
 
 	++*y;
 }
