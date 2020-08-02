@@ -2601,19 +2601,6 @@ out:
 	return b64;
 }
 
-static char *
-stripwhite(char *str, size_t *n)
-{
-	while (isspace(str[*n - 1]))
-		--*n;
-	str[*n] = '\0';
-
-	while (isspace(str[0]))
-		++str, --*n;
-
-	return str;
-}
-
 static int
 fileout(int must_edit)
 {
@@ -2651,7 +2638,7 @@ fileout(int must_edit)
 static void
 write_option(char const *option, char const *value, FILE *file)
 {
-	fprintf(file, "%s\t%s\n", option, value);
+	fprintf(file, "%s=%s\n", option, value);
 }
 
 static void
@@ -2677,7 +2664,7 @@ static void
 on_show_options(struct json_node *result, struct aria_download *d)
 {
 	FILE *f;
-	int err;
+	ssize_t len;
 	char *line;
 	size_t linesiz;
 	struct rpc_request *req;
@@ -2733,25 +2720,19 @@ on_show_options(struct json_node *result, struct aria_download *d)
 	json_write_beginobj(jw);
 
 	line = NULL, linesiz = 0;
-	while (-1 != (err = getline(&line, &linesiz, f))) {
+	while (-1 != (len = getline(&line, &linesiz, f))) {
 		char *name, *value;
-		size_t len;
 
-		if (NULL == (value = strchr(line, '\t')))
+		name = line;
+		if (NULL == (value = strchr(name, '=')))
 			continue;
-		*value = '\0';
-		if (line[err - 1] == '\n')
-			line[err - 1] = '\0';
+		*value++ = '\0';
 
-		len = value - line;
-		name = stripwhite(line, &len);
-
-		len = (err - 1) - ((value + 1) - line);
-		value = stripwhite(value + 1, &len);
+		if (line[len - 1] == '\n')
+			line[len - 1] = '\0';
 
 		json_write_key(jw, name);
 		json_write_str(jw, value);
-
 	}
 
 	json_write_endobj(jw);
@@ -2804,32 +2785,16 @@ show_options(struct aria_download *d)
 	update_options(d, 1);
 }
 
-struct downloads_add_arg {
-	size_t nlines;
-	char **lines;
-};
-
 /* select (last) newly added download and write back errorneous files */
 static void
-on_downloads_add(struct json_node *result, struct downloads_add_arg *arg)
+on_downloads_add(struct json_node *result, void *arg)
 {
-	FILE *f;
 	size_t n;
 
-	if (NULL == result) {
-		if (NULL != arg) {
-			while (arg->nlines > 0)
-				free(arg->lines[--arg->nlines]);
-			free(arg);
-		}
-		return;
-	}
+	(void)arg;
 
 	if (json_isempty(result))
-		goto out;
-
-	/* write back failed lines */
-	f = NULL != arg ? fopen(session_file, "w") : NULL;
+		return;
 
 	n = 0;
 	result = json_children(result);
@@ -2838,9 +2803,6 @@ on_downloads_add(struct json_node *result, struct downloads_add_arg *arg)
 
 		if (json_obj == json_type(result)) {
 			error_handler(result);
-
-			if (NULL != f)
-				fputs(arg->lines[n], f);
 		} else {
 			struct json_node *gid = json_children(result);
 
@@ -2854,23 +2816,11 @@ on_downloads_add(struct json_node *result, struct downloads_add_arg *arg)
 					selidx = dd - downloads;
 			}
 		}
-
-		if (NULL != arg)
-			free(arg->lines[n]);
 		++n;
 	} while (NULL != (result = json_next(result)));
 
-	if (NULL != f)
-		fclose(f);
-
 	on_downloads_change(1);
 	refresh();
-
-out:
-	if (NULL != arg) {
-		free(arg->lines);
-		free(arg);
-	}
 }
 
 static void
@@ -2880,10 +2830,8 @@ add_downloads(char cmd)
 	FILE *f;
 	char *line;
 	size_t linesiz;
-	ssize_t err;
-	size_t linelen;
+	ssize_t len;
 	int action;
-	struct downloads_add_arg *arg;
 
 	if ((action = run_action(NULL, "%c", cmd)) < 0)
 		action = fileout(1);
@@ -2894,7 +2842,7 @@ add_downloads(char cmd)
 	clear_error_message();
 
 	if (NULL == (f = fopen(session_file, "r"))) {
-		set_error_message("fopen(%s, \"r\"): %s",
+		set_error_message("fopen(\"%s\", \"r\"): %s",
 				session_file, strerror(errno));
 		return;
 	}
@@ -2902,8 +2850,6 @@ add_downloads(char cmd)
 	req = new_rpc();
 	if (NULL == req)
 		goto out_fclose;
-
-	(void)(arg = malloc(sizeof *arg));
 
 	req->handler = (rpc_handler)on_downloads_add;
 
@@ -2915,39 +2861,30 @@ add_downloads(char cmd)
 	/* 1st arg: “methods” */
 	json_write_beginarr(jw); /* {{{ */
 
-	arg->lines = NULL, arg->nlines = 0;
 	line = NULL, linesiz = 0;
-	while (-1 != (err = getline(&line, &linesiz, f))) {
-		char *uri;
+next:
+	for (len = getline(&line, &linesiz, f); -1 != len;) {
+		char *uri, *next_uri;
 		char *b64str = NULL;
-		enum { kind_torrent, kind_metalink, kind_uri } kind;
+		enum { kind_uri, kind_torrent, kind_metalink } kind;
 
-		if (NULL != arg) {
-			char **newlines;
+		if (0 < len && line[len - 1] == '\n')
+			line[--len] = '\0';
 
-			if (NULL != (newlines = realloc(arg->lines, ++arg->nlines * sizeof *arg->lines))) {
-				(arg->lines = newlines)[arg->nlines - 1] = strdup(line);
-			} else {
-				free(arg->lines);
-				free(arg);
-				arg = NULL;
-			}
+		if (0 == len)
+			goto next;
 
-		}
-
-		linelen = (size_t)err;
-		uri = stripwhite(line, &linelen);
+		uri = line;
+		if (NULL != (next_uri = strchr(uri, '\t')))
+			*next_uri++ = '\0';
 
 #define ISSUFFIX(lit) \
-	((size_t)linelen >= sizeof lit && \
-		 0 == memcmp(uri + (size_t)linelen - ((sizeof lit) - 1), lit, (sizeof lit) - 1))
-
-		if (0 == linelen)
-			continue;
+	((size_t)len > ((sizeof lit) - 1) && \
+		 0 == memcmp(uri + (size_t)len - ((sizeof lit) - 1), lit, (sizeof lit) - 1))
 
 		if (ISSUFFIX(".torrent"))
 			kind = kind_torrent;
-		else if ((ISSUFFIX(".meta4") || ISSUFFIX(".metalink")))
+		else if (ISSUFFIX(".meta4") || ISSUFFIX(".metalink"))
 			kind = kind_metalink;
 		else
 			kind = kind_uri;
@@ -2987,18 +2924,56 @@ add_downloads(char cmd)
 
 		case kind_uri:
 			json_write_beginarr(jw);
-			json_write_str(jw, uri);
+			for (;;) {
+				json_write_str(jw, uri);
+
+				if (NULL == (uri = next_uri))
+					break;
+
+				if (NULL != (next_uri = strchr(uri, '\t')))
+					*next_uri++ = '\0';
+			}
 			json_write_endarr(jw);
 			break;
 		}
 		if (kind_torrent == kind) {
 			/* “uris” */
 			json_write_beginarr(jw);
-			/* (none) */
+			while (NULL != next_uri) {
+				uri = next_uri;
+				if (NULL != (next_uri = strchr(uri, '\t')))
+					*next_uri++ = '\0';
+
+				json_write_str(jw, uri);
+			}
 			json_write_endarr(jw);
 		}
 		/* “options” */
 		json_write_beginobj(jw);
+		while (-1 != (len = getline(&line, &linesiz, f))) {
+			char *name, *value;
+
+			if (0 == len)
+				continue;
+
+			if (line[len - 1] == '\n')
+				line[--len] = '\0';
+
+			for (name = line; isspace(*name); )
+				++name;
+
+			/* no leading spaces */
+			if (name == line)
+				break;
+
+			if (NULL == (value = strchr(name, '=')))
+				break;
+			*value++ = '\0';
+
+			json_write_key(jw, name);
+			json_write_str(jw, value);
+		}
+
 		/* (none) */
 		json_write_endobj(jw);
 		/* “position” */
@@ -3015,8 +2990,6 @@ add_downloads(char cmd)
 
 	json_write_endarr(jw); /* }}} */
 	json_write_endarr(jw);
-
-	req->arg = arg;
 
 	do_rpc();
 
@@ -3116,48 +3089,10 @@ out_of_loop:
 }
 
 static void
-write_file(void)
-{
-	FILE *f;
-	size_t i;
-	struct aria_download *d;
-
-	if (num_downloads == 0)
-		return;
-
-	if (NULL == (f = fopen(session_file, "w")))
-		return;
-
-	d = downloads[selidx];
-
-	/* BitTorren dir/name; it may be a directory for a multi or a file for
-	 * a single-file Torrent */
-	if (NULL != d->dir && NULL != d->name)
-		fprintf(f, "file\t%s/%s\n", d->dir, d->name);
-
-	if (NULL != d->files) {
-		for (i = 0; i < d->num_files; ++i)
-			fprintf(f, "file\t%s\n", d->files[i].path);
-	}
-
-	fclose(f);
-}
-
-static void
-clear_file(void)
-{
-	truncate(session_file, 0);
-}
-
-static void
 on_download_remove(struct json_node *result, struct aria_download *d)
 {
 	if (NULL != result) {
 		struct aria_download **dd;
-
-		write_file();
-		(void)run_action(d, "D");
-		clear_file();
 
 		/* download removed */
 		if (NULL != (dd = find_download(d))) {
@@ -3195,60 +3130,11 @@ aria_download_remove(struct aria_download *d, int force)
 	do_rpc();
 }
 
-struct remove_download_arg {
-	struct aria_download *d;
-	int force;
-};
-
-static void
-on_remove_download(struct json_node *result, struct remove_download_arg *arg)
-{
-	if (NULL != result) {
-		parse_download_files(arg->d, result);
-		aria_download_remove(arg->d, arg->force);
-	}
-
-	unref_download(arg->d);
-	free(arg);
-}
-
 static void
 remove_download(struct aria_download *d, int force)
 {
-	if (0 < d->num_files) {
+	if (run_action(d, "D") < 0)
 		aria_download_remove(d, force);
-	} else {
-		/* fill download with files so action will get it */
-		struct rpc_request *req = new_rpc();
-		struct remove_download_arg *arg;
-
-		if (NULL == req)
-			return;
-
-		if (NULL == (arg = malloc(sizeof *arg))) {
-			free_rpc(req);
-			return;
-		}
-
-		arg->d = ref_download(d);
-		arg->force = force;
-
-		req->handler = (rpc_handler)on_remove_download;
-		req->arg = arg;
-
-		json_write_key(jw, "method");
-		json_write_str(jw, "aria2.getFiles");
-
-		json_write_key(jw, "params");
-		json_write_beginarr(jw);
-		/* “secret” */
-		json_write_str(jw, secret_token);
-		/* “gid” */
-		json_write_str(jw, d->gid);
-		json_write_endarr(jw);
-
-		do_rpc();
-	}
 }
 
 static void
@@ -3428,7 +3314,7 @@ stdin_read(void)
 			break;
 
 		case 'Q':
-			if (run_action(NULL, "Q") != EXIT_FAILURE)
+			if (EXIT_FAILURE != run_action(NULL, "Q"))
 				aria_shutdown(do_forced);
 			do_forced = 0;
 			break;
@@ -3446,10 +3332,7 @@ stdin_read(void)
 		default:
 		defaction:
 			/* TODO: if num_files == 0 request it first */
-			write_file();
 			run_action(NULL, "%s", keyname(ch));
-			clear_file();
-
 			do_forced = 0;
 			refresh();
 			break;

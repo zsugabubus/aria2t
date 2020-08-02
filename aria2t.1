@@ -37,10 +37,7 @@ They always receive the following arguments:
 Selection GID (or empty if there are none).
 .IP 2.
 Path to the
-.I session file
-, that contains
-.BR TAB -separated
-information about selection.
+.IR "session file" .
 .PP
 If an action terminates with failure, in-progress operation is cancelled. When
 an actions does not exist, either a default, builtin action is executed or it
@@ -95,26 +92,24 @@ Pause selected/all download(s).
 .TP
 .B a, A, +
 Add download(s) from
-.I session file
-(one per line).
+.IR "session file" .
 Open
 .I session file
 for editing unless there are associated actions. Select lastly added download.
 .sp
-By default, lines are treated like an URI. Lines ending with
+For the expected format refer to aria2's
+.IR "Input File" .
+Note that URIs that end with
 .BR .torrent \ and\  .meta4 \ or\  .metalink
-and referring to a readable file on the local filesystem are treated like
-Torrent and Metalink files, respectively.
+and refer to a readable file on the local filesystem, are got uploaded to
+aria2 as a blob.
 .sp
 Insert downloads after the selection in the queue.
-.sp
-Delete only lines that were successfully added to aria2; keep
-failed ones untouched.
 .
 .TP
 .B i, I
 Write selected download/global options in a
-.BR TAB -separated
+.BR = -separated
 key-value format into the
 .IR "session file" .
 Open
@@ -124,8 +119,7 @@ Edit the file to change options.
 .
 .TP
 .B D, DEL
-Remove download then run action \*(lqD\*(rq. (Can be used to implement a
-\*(lqremove with files\*(rq operation.)
+Remove download unless there is an action for \*(lqD\*(rq.
 .
 .TP
 .B x, X
