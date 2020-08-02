@@ -1083,7 +1083,7 @@ parse_download(struct aria_download *d, struct json_node *node)
 		}
 #define else_if_FIELD(local, name, type) \
 else if (0 == strcmp(field->key, name)) \
-d->local = strto##type(field->val.str, NULL, 10);
+	d->local = strto##type(field->val.str, NULL, 10);
 		else_if_FIELD(download_speed, "downloadSpeed", ul)
 		else_if_FIELD(upload_speed, "uploadSpeed", ul)
 		else_if_FIELD(total, "totalLength", ull)
@@ -1093,11 +1093,10 @@ d->local = strto##type(field->val.str, NULL, 10);
 		else_if_FIELD(num_connections, "connections", ul)
 #undef else_if_FIELD
 		else if (0 == strcmp(field->key, "following")) {
-			struct aria_download **dd = find_download_bygid(field->val.str, 1);
+			struct aria_download **dd = find_download_bygid(field->val.str, 0);
 			d->following = NULL != dd ? *dd : NULL;
 		} else if (0 == strcmp(field->key, "belongsTo")) {
-			struct aria_download **dd = find_download_bygid(field->val.str, 1);
-			assert(!"eeeeeeeee");
+			struct aria_download **dd = find_download_bygid(field->val.str, 0);
 			d->belongs_to = NULL != dd ? *dd : NULL;
 		} else if (0 == strcmp(field->key, "errorMessage")) {
 			free(d->error_message);
