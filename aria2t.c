@@ -157,6 +157,7 @@ struct aria_download {
 	uint64_t total;
 	uint64_t have;
 	uint64_t uploaded;
+	uint64_t verified;
 
 	uint32_t download_speed;
 	uint32_t upload_speed;
@@ -1050,6 +1051,9 @@ parse_download(struct aria_download *d, struct json_node *node)
 {
 	struct json_node *field = json_children(node);
 
+	/* only present if non-zero */
+	d->verified = 0;
+
 	do {
 		if (0 == strcmp(field->key, "gid")) {
 			assert(strlen(field->val.str) == sizeof d->gid - 1);
@@ -1091,8 +1095,11 @@ else if (0 == strcmp(field->key, name)) \
 		else_if_FIELD(uploaded, "uploadLength", ull)
 		/* else_if_FIELD(num_seeders, "numSeeders", ul) */
 		else_if_FIELD(num_connections, "connections", ul)
+		else_if_FIELD(verified, "verifiedLength", ul)
 #undef else_if_FIELD
-		else if (0 == strcmp(field->key, "following")) {
+		else if (0 == strcmp(field->key, "verifyIntegrityPending")) {
+			d->verified = UINT64_MAX;
+		} else if (0 == strcmp(field->key, "following")) {
 			struct aria_download **dd = find_download_bygid(field->val.str, 0);
 			d->following = NULL != dd ? *dd : NULL;
 		} else if (0 == strcmp(field->key, "belongsTo")) {
@@ -1411,9 +1418,6 @@ update_delta(int all)
 			if (DOWNLOAD_REMOVED != abs(d->status))
 				json_write_str(jw, "status");
 
-			/* json_write_str(jw, "verifiedLength");
-			json_write_str(jw, "verifyIntegrityPending"); */
-
 			if (NULL == d->name && !d->requested_bittorrent && d->status < 0) {
 				/* if (DOWNLOAD_REMOVED != abs(d->status))
 					json_write_str(jw, "seeder"); */
@@ -1453,6 +1457,9 @@ update_delta(int all)
 				break;
 
 			case DOWNLOAD_ACTIVE:
+				json_write_str(jw, "verifiedLength");
+				json_write_str(jw, "verifyIntegrityPending");
+
 				if (globalstat.download_speed > 0 ||
 					d->download_speed > 0) {
 					json_write_str(jw, "completedLength");
@@ -2089,31 +2096,48 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 		break;
 
 	case DOWNLOAD_ACTIVE:
-		addstr("> ");
+		addstr(d->verified == 0 ? "> " : "v ");
 		attr_set(A_NORMAL, 0, NULL);
 
-		if (d->download_speed > 0) {
-			attr_set(A_BOLD, COLOR_DOWN, NULL);
-			n = fmt_percent(fmtbuf, d->have, d->total);
-			addnstr(fmtbuf, n);
+		if (d->verified == 0) {
+			if (d->download_speed > 0) {
+				attr_set(A_BOLD, COLOR_DOWN, NULL);
+				n = fmt_percent(fmtbuf, d->have, d->total);
+				addnstr(fmtbuf, n);
 
-			attr_set(A_NORMAL, 0, NULL);
-			addstr(" @ ");
+				attr_set(A_NORMAL, 0, NULL);
+				addstr(" @ ");
 
-			attr_set(A_BOLD, COLOR_DOWN, NULL);
-			n = fmt_speed(fmtbuf, d->download_speed);
-			addnstr(fmtbuf, n);
+				attr_set(A_BOLD, COLOR_DOWN, NULL);
+				n = fmt_speed(fmtbuf, d->download_speed);
+				addnstr(fmtbuf, n);
+				addstr(" ");
+			} else {
+				addstr(" ");
+				n = fmt_space(fmtbuf, d->total);
+				addnstr(fmtbuf, n);
+
+				addstr("[");
+				attr_set(d->have == d->total ? A_NORMAL : A_BOLD, COLOR_DOWN, NULL);
+				n = fmt_percent(fmtbuf, d->have, d->total);
+				addnstr(fmtbuf, n);
+				attr_set(A_NORMAL, 0, NULL);
+				addstr("] ");
+			}
+		} else if (d->verified == UINT64_MAX) {
 			addstr(" ");
+			n = fmt_space(fmtbuf, d->have);
+			addnstr(fmtbuf, n);
+
+			addstr("       ");
 		} else {
 			addstr(" ");
-			n = fmt_space(fmtbuf, d->total);
+			n = fmt_space(fmtbuf, d->verified);
 			addnstr(fmtbuf, n);
 
 			addstr("[");
-			attr_set(d->have == d->total ? A_NORMAL : A_BOLD, COLOR_DOWN, NULL);
-			n = fmt_percent(fmtbuf, d->have, d->total);
+			n = fmt_percent(fmtbuf, d->verified, d->have);
 			addnstr(fmtbuf, n);
-			attr_set(A_NORMAL, 0, NULL);
 			addstr("] ");
 		}
 
@@ -3068,8 +3092,8 @@ update_all(void)
 		json_write_str(jw, "totalLength");
 		json_write_str(jw, "completedLength");
 		json_write_str(jw, "uploadLength");
-		/* json_write_str(jw, "verifiedLength");
-		json_write_str(jw, "verifyIntegrityPending"); */
+		json_write_str(jw, "verifiedLength");
+		json_write_str(jw, "verifyIntegrityPending");
 		json_write_str(jw, "errorMessage");
 		json_write_str(jw, "uploadSpeed");
 		json_write_str(jw, "downloadSpeed");
