@@ -2395,7 +2395,6 @@ draw_statusline(void)
 	n = fmt_speed(fmtbuf, globalstat.upload_total);
 	mvaddnstr(y, x -= n, fmtbuf, n);
 
-	attr_set(globalstat.upload_speed > 0 ? A_BOLD : A_NORMAL, 0, NULL);
 	mvaddstr(y, x -= 3, " ↑ ");
 	attr_set(A_NORMAL, 0, NULL);
 
@@ -2416,7 +2415,6 @@ draw_statusline(void)
 	n = fmt_speed(fmtbuf, globalstat.have_total);
 	mvaddnstr(y, x -= n, fmtbuf, n);
 
-	attr_set(globalstat.download_speed > 0 ? A_BOLD : A_NORMAL, 0, NULL);
 	mvaddstr(y, x -= 3, " ↓ ");
 	attr_set(A_NORMAL, 0, NULL);
 
