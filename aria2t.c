@@ -3138,6 +3138,19 @@ remove_download(struct aria_download *d, int force)
 }
 
 static void
+switch_view(int next)
+{
+	if (!(view = strchr(VIEWS + 1, view)[next ? 1 : -1])) {
+		view = VIEWS[next ? 1 : array_len(VIEWS) - 2];
+		oldselidx = -1; /* force redraw */
+	}
+
+	update_delta(1);
+	draw_all();
+	refresh();
+}
+
+static void
 stdin_read(void)
 {
 	int ch;
@@ -3176,25 +3189,13 @@ stdin_read(void)
 			break;
 
 		case 'v':
-			if (!(view = strchr(VIEWS + 1, view)[1])) {
-				view = VIEWS[1];
-				oldselidx = -1; /* force redraw */
-			}
-
-			update_delta(1);
-			draw_all();
-			refresh();
+		case KEY_RIGHT:
+			switch_view(1);
 			break;
 
 		case 'V':
-			if (!(view = strchr(VIEWS + 1, view)[-1])) {
-				view = VIEWS[array_len(VIEWS) - 2];
-				oldselidx = -1; /* force redraw */
-			}
-
-			update_delta(1);
-			draw_all();
-			refresh();
+		case KEY_LEFT:
+			switch_view(0);
 			break;
 
 		case CONTROL('D'):
@@ -3333,6 +3334,7 @@ stdin_read(void)
 		defaction:
 			/* TODO: if num_files == 0 request it first */
 			run_action(NULL, "%s", keyname(ch));
+
 			do_forced = 0;
 			refresh();
 			break;

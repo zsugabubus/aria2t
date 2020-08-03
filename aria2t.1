@@ -46,11 +46,11 @@ is treated like it was terminated with success.
 .SH USAGE
 .SS "Keyboard Control"
 .TP
-.B k, UP
+.BR k ,\  UP
 Move selection upwards.
 .
 .TP
-.B j, DOWN
+.BR j ,\  DOWN
 Move selection downwards.
 .
 .TP
@@ -62,11 +62,11 @@ Move selection half-screen up.
 Move selection half-screen down.
 .
 .TP
-.B g, HOME
+.BR g ,\  HOME
 Select first.
 .
 .TP
-.B G, END
+.BR G ,\  END
 Select last.
 .
 .TP
@@ -82,15 +82,15 @@ Move selected download forward in the queue.
 Move selected download backward in the queue.
 .
 .TP
-.B s, S
+.BR s ,\  S
 Start (unpause) selected/all download(s).
 .
 .TP
-.B p, P
+.BR p ,\  P
 Pause selected/all download(s).
 .
 .TP
-.B a, A, +
+.BR a ,\  A ,\  +
 Add download(s) from
 .IR "session file" .
 Open
@@ -107,7 +107,7 @@ aria2 as a blob.
 Insert downloads after the selection in the queue.
 .
 .TP
-.B i, I
+.BR i ,\  I
 Write selected download/global options in a
 .BR = -separated
 key-value format into the
@@ -118,36 +118,20 @@ for viewing unless there are associated actions.
 Edit the file to change options.
 .
 .TP
-.B D, DEL
+.BR D ,\  DEL
 Remove download unless there is an action for \*(lqD\*(rq.
 .
 .TP
-.B x, X
+.BR x ,\  X
 Remove download result for selection/all downloads.
 .
 .TP
-.B v, V
-Switch to next/previous view.
-.sp
-The following views are available (in this order):
-.RS
-.IP \(bu
-.BR Downloads \ (default).
-Shows downloads in an auto-ordered list: Topmost the queued
-and currently active ones; completed downloads and errors at the bottom;
-everything else is in-between.
-.IP \(bu
-.BR Files.
-Shows download state and path for files of a download, URIs of files and servers used for downloading a
-URI. Starred (\*(lq*\*(rq) URIs are the ones that were used for downloading. Dashed (\*(lq----\*(rq)
-progress means an unselected file.
-.IP \(bu
-.BR Peers.
-Shows connected BitTorrent peers\(aq IP address, port number, (their) progress
-and download speed, speed information about how fast aria2 downloads and uploads
-from/to them (dashes means choking), and the peer id.
-.PP
-.RE
+.BR v ,\  RIGHT
+Switch to next view.
+.
+.TP
+.BR V ,\  LEFT
+Switch to previous view.
 .
 .TP
 .B !
@@ -182,6 +166,25 @@ Run action \*(lqQ\*(rq then shut down aria2.
 .R (other)
 Run action named like the pressed key. Uses
 .BR keyname (3x).
+.
+.SS Views
+The following views are available (in this order):
+.IP \(bu
+.BR Downloads \ (default).
+Shows downloads in an auto-ordered list: Topmost the queued
+and currently active ones; completed downloads and errors at the bottom;
+everything else is in-between.
+.IP \(bu
+.BR Files.
+Shows download state and path for files of a download, URIs of files and servers used for downloading a
+URI. Starred (\*(lq*\*(rq) URIs are the ones that were used for downloading. Dashed (\*(lq----\*(rq)
+progress means an unselected file.
+.IP \(bu
+.BR Peers.
+Shows connected BitTorrent peers\(aq IP address, port number, (their) progress
+and download speed, speed information about how fast aria2 downloads and uploads
+from/to them (dashes means choking), and the peer id.
+.PP
 .
 .SH ENVIRONMENT
 .TP
