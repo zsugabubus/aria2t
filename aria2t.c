@@ -2129,14 +2129,14 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 			n = fmt_space(fmtbuf, d->have);
 			addnstr(fmtbuf, n);
 
-			addstr("       ");
+			addstr("        ");
 		} else {
 			addstr(" ");
 			n = fmt_space(fmtbuf, d->verified);
 			addnstr(fmtbuf, n);
 
 			addstr("[");
-			n = fmt_percent(fmtbuf, d->verified, d->have);
+			n = fmt_percent(fmtbuf, d->verified, d->total);
 			addnstr(fmtbuf, n);
 			addstr("] ");
 		}
