@@ -1999,7 +1999,7 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 	(void)root;
 
 	attr_set(A_NORMAL, 0, NULL);
-	mvaddstr(*y, 0, d->gid);
+	mvaddnstr(*y, 0, d->gid, 6);
 	addstr(" ");
 	{
 		/* struct aria_download *child = d; */
