@@ -830,6 +830,10 @@ parse_peers(struct aria_download *d, struct json_node *node)
 		struct aria_peer *oldp;
 		uint32_t j;
 
+		uint64_t pieces_change;
+		uint64_t bytes_change;
+		uint64_t time_ns_change;
+
 		parse_peer((p = &d->peers[i]), node);
 
 		/* find new peer among previous ones to being able to compute
@@ -848,24 +852,21 @@ parse_peers(struct aria_download *d, struct json_node *node)
 		continue;
 
 	found_oldpeer:
-		/* compute delta */
-		if (oldp->pieces_have < p->pieces_have) {
+		/* compute peer speed */
 #define NS_PER_SEC UINT64_C(1000000000)
-			uint64_t pieces_change = p->pieces_have - oldp->pieces_have;
-			uint64_t bytes_change = pieces_change * d->piece_size;
-			uint64_t ns_change =
-				(now.tv_sec - oldp->peer_measured_at.tv_sec) * NS_PER_SEC +
-				now.tv_nsec - oldp->peer_measured_at.tv_nsec;
+		pieces_change = p->pieces_have - oldp->pieces_have;
+		bytes_change = pieces_change * d->piece_size;
+		time_ns_change =
+			(now.tv_sec - oldp->peer_measured_at.tv_sec) * NS_PER_SEC +
+			now.tv_nsec - oldp->peer_measured_at.tv_nsec;
 
-			p->peer_download_speed = (bytes_change * NS_PER_SEC) / ns_change;
-			p->peer_measured_at = now;
+		p->peer_download_speed = (bytes_change * NS_PER_SEC) / time_ns_change;
 #undef NS_PER_SEC
-		} else {
-			/* nothing happened since then */
-			p->peer_download_speed = oldp->peer_download_speed;
-			p->peer_measured_at = oldp->peer_measured_at;
-		}
-
+		/* measure time from latest change */
+		p->peer_measured_at =
+			oldp->pieces_have != p->pieces_have
+				? now
+				: oldp->peer_measured_at;
 	} while (++i, NULL != (node = json_next(node)));
 
 free_oldpeers:
