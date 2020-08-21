@@ -778,6 +778,23 @@ parse_peer_id(struct aria_peer *p, char *peer_id)
 	assert('\0' == *s);
 }
 
+static void
+parse_peer_bitfield(struct aria_peer *p, char *bitfield)
+{
+	static uint8_t const HEX_POPCOUNT[] = {
+		0, 1, 1, 2, 1, 2, 2, 3,
+		1, 2, 2, 3, 2, 3, 3, 4,
+	};
+	uint32_t pieces_have = 0;
+	char *hex;
+
+	for (hex = bitfield; '\0' != *hex; ++hex)
+		pieces_have += HEX_POPCOUNT[*hex <= '9' ? *hex - '0' : *hex - 'a' + 10];
+
+	p->pieces_have = pieces_have;
+}
+
+static void
 parse_peer(struct aria_peer *p, struct json_node *node)
 {
 	struct json_node *field = json_children(node);
@@ -788,19 +805,9 @@ parse_peer(struct aria_peer *p, struct json_node *node)
 			strncpy(p->ip, field->val.str, sizeof p->ip - 1);
 		else if (0 == strcmp(field->key, "port"))
 			p->port = strtoul(field->val.str, NULL, 10);
-		else if (0 == strcmp(field->key, "bitfield")) {
-			static uint8_t const HEX_POPCOUNT[] = {
-				0, 1, 1, 2, 1, 2, 2, 3,
-				1, 2, 2, 3, 2, 3, 3, 4,
-			};
-			uint32_t pieces_have = 0;
-			char *hex;
-
-			for (hex = field->val.str; '\0' != *hex; ++hex)
-				pieces_have += HEX_POPCOUNT[*hex <= '9' ? *hex - '0' : *hex - 'a' + 10];
-
-			p->pieces_have = pieces_have;
-		} else if (0 == strcmp(field->key, "amChoking"))
+		else if (0 == strcmp(field->key, "bitfield"))
+			parse_peer_bitfield(p, field->val.str);
+		else if (0 == strcmp(field->key, "amChoking"))
 			p->up_choked = 0 == strcmp(field->val.str, "true");
 		else if (0 == strcmp(field->key, "peerChoking"))
 			p->down_choked = 0 == strcmp(field->val.str, "true");
