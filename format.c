@@ -1,16 +1,33 @@
-#include "format.h"
+#include <langinfo.h>
 
-/* 9d08h
-1h13m */
+#include "format.h"
 
 #define array_len(a) (sizeof(a) / sizeof(*a))
 
-static char const TIME_UNITS[]	  = { 's', 'm', 'h', 'd', 'w' , '>' };
-static uint32_t const TIME_BASE[] = {	1,	60,  60 * 60, 24 * 60 * 60, 7 * 24 * 60 * 60, 52 * 7 * 24 * 60 * 60, UINT32_MAX };
+static char const
+TIME_UNITS[] = {
+	's',
+	'm',
+	'h',
+	'd',
+	'w',
+	'>'
+};
 
-/* 29d24h19m30s */
+static uint32_t const
+TIME_BASE[] = {
+	1,
+	60,
+	60 * 60,
+	60 * 60 * 24,
+	60 * 60 * 24 * 7,
+	60 * 60 * 24 * 7 * 52,
+	UINT32_MAX
+};
+
 int
-fmt_time(char *str, uint32_t time) {
+fmt_time(char *str, uint32_t time)
+{
 	uint8_t i;
 	uint8_t t;
 
@@ -47,7 +64,8 @@ fmt_time(char *str, uint32_t time) {
 }
 
 static int
-fmt_decimal(char *str, uint64_t n, char const *UNITS, uint64_t const *BASE) {
+fmt_decimal(char *str, uint64_t n, char const *UNITS, uint64_t const *BASE)
+{
 	int i = 0;
 
 	while (n >= 1000 * BASE[i++])
@@ -68,7 +86,7 @@ fmt_decimal(char *str, uint64_t n, char const *UNITS, uint64_t const *BASE) {
 		n *= 10;
 		n /= BASE[2];
 		str[0] = '0' + (n / 10U);
-		str[1] = '.';
+		str[1] = *nl_langinfo(RADIXCHAR);
 		str[2] = '0' + (n % 10U);
 	}
 
@@ -78,38 +96,49 @@ fmt_decimal(char *str, uint64_t n, char const *UNITS, uint64_t const *BASE) {
 	return 4;
 }
 
-static char const BYTES_METRIC_UNITS[] = { ' ', 'B', 'k', 'M', 'G', 'T', 'Y' };
-static uint64_t const BYTES_METRIC_BASE[] = { 1, 1e0, 1e3, 1e6, 1e9, 1e12, 1e15, 1e18 };
+static char const
+BYTES_METRIC_UNITS[] = { ' ', 'B', 'k', 'M', 'G', 'T', 'Y' };
+static uint64_t const
+BYTES_METRIC_BASE[] = { 1, 1e0, 1e3, 1e6, 1e9, 1e12, 1e15, 1e18 };
 
 int
-fmt_speed(char *str, uint64_t num) {
+fmt_speed(char *str, uint64_t num)
+{
 	return fmt_decimal(str, num, BYTES_METRIC_UNITS, BYTES_METRIC_BASE);
 }
 
 #define E(n) ((uint64_t)1 << (10U * n))
-static char const BYTES_IEC_UNITS[] = { ' ', 'B', 'K', 'M', 'G', 'T', 'Y' };
-static uint64_t const BYTES_IEC_BASE[] = { 1, E(0), E(1), E(2), E(3), E(4), E(5), E(6) };
+static char const
+BYTES_IEC_UNITS[] = { ' ', 'B', 'K', 'M', 'G', 'T', 'Y' };
+static uint64_t const
+BYTES_IEC_BASE[] = { 1, E(0), E(1), E(2), E(3), E(4), E(5), E(6) };
 #undef E
 
 int
-fmt_space(char *str, uint64_t num) {
+fmt_space(char *str, uint64_t num)
+{
 	return fmt_decimal(str, num, BYTES_IEC_UNITS, BYTES_IEC_BASE);
 }
 
-static char const NUMBER_UNITS[] = { ' ', ' ', 'k', 'm', 'b' };
-static uint64_t const NUMBER_BASE[] = { 1, 1e0, 1e3, 1e6, 1e9, 1e12 };
+static char const
+NUMBER_UNITS[] = { ' ', ' ', 'k', 'm', 'b' };
+static uint64_t const
+NUMBER_BASE[] = { 1, 1e0, 1e3, 1e6, 1e9, 1e12 };
 
 int
-fmt_number(char *str, uint64_t num) {
+fmt_number(char *str, uint64_t num)
+{
 	return fmt_decimal(str, num, NUMBER_UNITS, NUMBER_BASE);
 }
 
-int fmt_percent(char *str, uint64_t num, uint64_t total) {
+int
+fmt_percent(char *str, uint64_t num, uint64_t total)
+{
 #define PERCENT * 100
 	uint32_t p = total > 0 ? num * (uint64_t)(100 PERCENT) / total : 0;
 	if (p < 10 PERCENT) {
 		str[0] = '0' + (p / 100);
-		str[1] = '.';
+		str[1] = *nl_langinfo(RADIXCHAR);
 		str[2] = '0' + (p / 10 % 10);
 		str[3] = '0' + (p % 10);
 		str[4] = '%';
@@ -117,7 +146,7 @@ int fmt_percent(char *str, uint64_t num, uint64_t total) {
 		p /= 10; /* Drop one decimal. */
 		str[0] = '0' + (p / 100);
 		str[1] = '0' + (p / 10 % 10);
-		str[2] = '.';
+		str[2] = *nl_langinfo(RADIXCHAR);
 		str[3] = '0' + (p % 10);
 		str[4] = '%';
 	} else if (p < 10000 PERCENT) {

@@ -3533,8 +3533,7 @@ main(int argc, char *argv[])
 	sigset_t sigmask;
 	int argi;
 
-	/* Needed for ncurses UTF-8. */
-	setlocale(LC_CTYPE, "");
+	setlocale(LC_ALL, "");
 
 	sigemptyset(&sigmask);
 	sigaddset(&sigmask, SIGWINCH);
