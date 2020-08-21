@@ -1758,16 +1758,14 @@ draw_peer(struct aria_download const *d, size_t i, int *y)
 	struct aria_peer const *p = &d->peers[i];
 	char fmtbuf[5];
 	int n;
-	int w = getmaxx(stdscr);
+	int x, w = getmaxx(stdscr);
 
 	attr_set(A_NORMAL, 0, NULL);
 	mvprintw(*y, 0, "  %s:%-5u", p->ip, p->port);
 	clrtoeol();
 
-	move(*y, 2 + sizeof p->ip + 1 + 5);
-
-	if (w < getcurx(stdscr) + 25)
-		move(*y, w - 25);
+	x = 2 + sizeof p->ip + 1 + 5;
+	move(*y, x + 25 <= w ? x : w - 25);
 
 	addstr(" ");
 	n = fmt_percent(fmtbuf, p->pieces_have, d->num_pieces);
