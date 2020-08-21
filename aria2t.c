@@ -86,7 +86,7 @@ static char view = VIEWS[1];
 #define DOWNLOAD_ERROR    6
 
 struct aria_peer {
-	char *peerid;
+	char peer_id[20];
 
 	char ip[INET6_ADDRSTRLEN];
 	in_port_t port;
@@ -223,7 +223,7 @@ static void draw_download(struct aria_download const *d, struct aria_download co
 static void
 free_peer(struct aria_peer *p)
 {
-	free(p->peerid);
+	(void)p;
 }
 
 static void
@@ -760,12 +760,30 @@ parse_file_servers(struct aria_file *f, struct json_node *node)
 }
 
 static void
+parse_peer_id(struct aria_peer *p, char *peer_id)
+{
+#define HEX2NR(ch) (ch <= '9' ? ch - '0' : ch - 'A' + 10)
+	char *s = peer_id, *d = p->peer_id;
+
+	for (; d != p->peer_id + sizeof p->peer_id; ++d) {
+		if ('%' == *s) {
+			*d = (HEX2NR(s[1]) << 4) | HEX2NR(s[2]);
+			s += 3;
+		} else {
+			*d = *s;
+			s += 1;
+		}
+	}
+#undef HEX2NR
+	assert('\0' == *s);
+}
+
 parse_peer(struct aria_peer *p, struct json_node *node)
 {
 	struct json_node *field = json_children(node);
 	do {
 		if (0 == strcmp(field->key, "peerId"))
-			p->peerid = strdup(field->val.str);
+			parse_peer_id(p, field->val.str);
 		else if (0 == strcmp(field->key, "ip"))
 			strncpy(p->ip, field->val.str, sizeof p->ip - 1);
 		else if (0 == strcmp(field->key, "port"))
@@ -833,7 +851,9 @@ parse_peers(struct aria_download *d, struct json_node *node)
 		 * its progress/speed change */
 		for (j = 0; j < num_oldpeers; ++j) {
 			oldp = &oldpeers[j];
-			if (0 == strcmp(p->peerid, oldp->peerid))
+			if (0 == memcmp(p->peer_id, oldp->peer_id, sizeof p->peer_id) &&
+			    p->port == oldp->port &&
+			    0 == strcmp(p->ip, oldp->ip))
 				goto found_oldpeer;
 		}
 		/* a new peer */
@@ -1774,8 +1794,6 @@ draw_peer(struct aria_download const *d, size_t i, int *y)
 	} else {
 		addstr("    ");
 	}
-	addstr("  ");
-	addstr(p->peerid);
 	clrtoeol();
 
 	++*y;
