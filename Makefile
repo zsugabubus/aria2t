@@ -7,7 +7,7 @@ GZIP ?= gzip --best --force
 PKGCONFIG ?= pkg-config
 
 TARGETS := aria2t
-CFLAGS += -g -O0 -pedantic -Wall -Wextra
+CFLAGS += -g -O2 -pedantic -Wall -Wextra
 
 all : $(TARGETS)
 
