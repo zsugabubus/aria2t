@@ -1759,14 +1759,17 @@ draw_peer(struct aria_download const *d, size_t i, int *y)
 	char fmtbuf[5];
 	int n;
 	int w = getmaxx(stdscr);
-	int ipw = w > (int)sizeof p->ip + 30 ? sizeof p->ip : 0;
-
-	attr_set(A_BOLD, 0, NULL);
-	mvprintw(*y, 0, "  %*.*s", ipw, ipw, p->ip);
 
 	attr_set(A_NORMAL, 0, NULL);
-	printw(":%-5u  ", p->port);
+	mvprintw(*y, 0, "  %s:%-5u", p->ip, p->port);
+	clrtoeol();
 
+	move(*y, 2 + sizeof p->ip + 1 + 5);
+
+	if (w < getcurx(stdscr) + 25)
+		move(*y, w - 25);
+
+	addstr(" ");
 	n = fmt_percent(fmtbuf, p->pieces_have, d->num_pieces);
 	addnstr(fmtbuf, n);
 
@@ -1801,7 +1804,6 @@ draw_peer(struct aria_download const *d, size_t i, int *y)
 	} else {
 		addstr("    ");
 	}
-	clrtoeol();
 
 	++*y;
 }
