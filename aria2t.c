@@ -95,8 +95,8 @@ struct aria_peer {
 	unsigned down_choked: 1;
 
 	uint32_t pieces_have;
+	struct timespec latest_change; /* latest time when pieces_have changed */
 
-	struct timespec peer_measured_at;
 	uint32_t peer_download_speed;
 
 	uint32_t download_speed;
@@ -796,8 +796,7 @@ parse_peer(struct aria_peer *p, struct json_node *node)
 static void
 parse_peers(struct aria_download *d, struct json_node *node)
 {
-	void *p;
-	uint32_t i;
+	struct aria_peer *p;
 	uint32_t num_oldpeers;
 	struct timespec now;
 	struct aria_peer *oldpeers;
@@ -823,51 +822,64 @@ parse_peers(struct aria_download *d, struct json_node *node)
 		&now
 	);
 
-	i = 0;
 	node = json_children(node);
 	do {
-		struct aria_peer *p;
 		struct aria_peer *oldp;
 		uint32_t j;
 
-		uint64_t pieces_change;
-		uint64_t bytes_change;
-		uint64_t time_ns_change;
-
-		parse_peer((p = &d->peers[i]), node);
+		parse_peer(p, node);
 
 		/* find new peer among previous ones to being able to compute
 		 * its progress/speed change */
 		for (j = 0; j < num_oldpeers; ++j) {
 			oldp = &oldpeers[j];
-			if (/*oldp->port == p->port &&
-			    0 == strcmp(oldp->ip, p->ip) &&*/
-			    0 == strcmp(oldp->peerid, p->peerid)) {
+			if (0 == strcmp(p->peerid, oldp->peerid))
 				goto found_oldpeer;
-			}
 		}
-		/* new peer; already added to the list just initialize */
+		/* a new peer */
 		p->peer_download_speed = 0;
-		p->peer_measured_at = now;
+		p->latest_change = now;
 		continue;
 
 	found_oldpeer:
 		/* compute peer speed */
+		/* if peer has not reached 100% we assume it downloads continously */
+		if (p->pieces_have < d->num_pieces) {
+			uint64_t pieces_change;
+			uint64_t bytes_change;
+			uint64_t time_ns_change;
 #define NS_PER_SEC UINT64_C(1000000000)
-		pieces_change = p->pieces_have - oldp->pieces_have;
-		bytes_change = pieces_change * d->piece_size;
-		time_ns_change =
-			(now.tv_sec - oldp->peer_measured_at.tv_sec) * NS_PER_SEC +
-			now.tv_nsec - oldp->peer_measured_at.tv_nsec;
 
-		p->peer_download_speed = (bytes_change * NS_PER_SEC) / time_ns_change;
+			pieces_change =
+				p->pieces_have != oldp->pieces_have
+					? p->pieces_have - oldp->pieces_have
+					: 1;
+			bytes_change = pieces_change * d->piece_size;
+			time_ns_change =
+				(now.tv_sec  - oldp->latest_change.tv_sec) * NS_PER_SEC +
+				 now.tv_nsec - oldp->latest_change.tv_nsec;
+
+			p->peer_download_speed = (bytes_change * NS_PER_SEC) / time_ns_change;
+
+			/* if pieces_have changed since last time we could
+			 * exactly compute the speed from the difference.
+			 * otherwise we derive it from the theoretical maximum
+			 * speed needed for transferring one piece
+			 * (p->peer_download_speed) and previous speed. */
+			if (p->pieces_have != oldp->pieces_have) {
+				p->latest_change = now;
+			} else {
+				p->latest_change = oldp->latest_change;
+				if (oldp->peer_download_speed < p->peer_download_speed)
+					p->peer_download_speed = oldp->peer_download_speed;
+			}
+
 #undef NS_PER_SEC
-		/* measure time from latest change */
-		p->peer_measured_at =
-			oldp->pieces_have != p->pieces_have
-				? now
-				: oldp->peer_measured_at;
-	} while (++i, NULL != (node = json_next(node)));
+		} else {
+			p->peer_download_speed = 0;
+			/* NOTE: we let latest_change uninitialized; we not need that anymore */
+		}
+	} while (++p, NULL != (node = json_next(node)));
 
 free_oldpeers:
 	free_peers(oldpeers, num_oldpeers);
