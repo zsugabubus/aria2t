@@ -1133,7 +1133,6 @@ else if (0 == strcmp(field->key, name)) \
 		else_if_FIELD(total, "totalLength", ull)
 		else_if_FIELD(have, "completedLength", ull)
 		else_if_FIELD(uploaded, "uploadLength", ull)
-		/* else_if_FIELD(num_seeders, "numSeeders", ul) */
 		else_if_FIELD(num_connections, "connections", ul)
 		else_if_FIELD(verified, "verifiedLength", ul)
 #undef else_if_FIELD
@@ -1183,16 +1182,16 @@ parse_global_stat(struct json_node *node)
 	node = json_children(node);
 	do {
 		if (0);
-#define PARSE_FIELD(field, name, type) \
-	else if (0 == strcmp(node->key, name)) \
-		globalstat.field = strto##type(node->val.str, NULL, 10);
-		PARSE_FIELD(download_speed, "downloadSpeed", ul)
-		PARSE_FIELD(upload_speed, "uploadSpeed", ul)
-		PARSE_FIELD(num_active, "numActive", ul)
-		PARSE_FIELD(num_waiting, "numWaiting", ul)
-		PARSE_FIELD(num_stopped, "numStopped", ul)
-		PARSE_FIELD(num_stopped_total, "numStoppedTotal", ul)
-#undef PARSE_FIELD
+#define else_if_FIELD(field, name, type) \
+else if (0 == strcmp(node->key, name)) \
+	globalstat.field = strto##type(node->val.str, NULL, 10);
+		else_if_FIELD(download_speed, "downloadSpeed", ul)
+		else_if_FIELD(upload_speed, "uploadSpeed", ul)
+		else_if_FIELD(num_active, "numActive", ul)
+		else_if_FIELD(num_waiting, "numWaiting", ul)
+		else_if_FIELD(num_stopped, "numStopped", ul)
+		else_if_FIELD(num_stopped_total, "numStoppedTotal", ul)
+#undef else_if_FIELD
 	} while (NULL != (node = json_next(node)));
 }
 
