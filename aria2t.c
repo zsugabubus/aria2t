@@ -272,6 +272,8 @@ free_peers(struct aria_peer *peers, uint32_t num_peers)
 
 	for (i = 0; i < num_peers; ++i)
 		free_peer(&peers[i]);
+
+	free(peers);
 }
 
 static void
@@ -294,7 +296,6 @@ free_download(struct aria_download *d)
 	free_files_of(d);
 
 	free_peers(d->peers, d->num_peers);
-	free(d->peers);
 
 	free(d->dir);
 	free(d->name);
