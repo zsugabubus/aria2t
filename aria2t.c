@@ -31,6 +31,8 @@
 #include "format.h"
 #include "b64.h"
 
+#include "keys.in"
+
 /*
  * TODO: following downloads
  * TODO: naming_convention
@@ -85,6 +87,9 @@ static char view = VIEWS[1];
 #define DOWNLOAD_REMOVED  5
 #define DOWNLOAD_ERROR    6
 
+/* str := "true" | "false" */
+#define IS_TRUE(str) ('t' == str[0])
+
 struct aria_peer {
 	char peer_id[20];
 
@@ -99,13 +104,13 @@ struct aria_peer {
 
 	uint32_t peer_download_speed;
 
-	uint32_t download_speed;
-	uint32_t upload_speed;
+	uint64_t download_speed;
+	uint64_t upload_speed;
 };
 
 struct aria_server {
 	char *current_uri;
-	uint32_t download_speed;
+	uint64_t download_speed;
 
 };
 enum aria_uri_status {
@@ -159,10 +164,10 @@ struct aria_download {
 	uint64_t uploaded;
 	uint64_t verified;
 
-	uint32_t download_speed;
-	uint32_t upload_speed;
-	uint32_t download_speed_limit;
-	uint32_t upload_speed_limit;
+	uint64_t download_speed;
+	uint64_t upload_speed;
+	uint64_t download_speed_limit;
+	uint64_t upload_speed_limit;
 
 	char *dir;
 
@@ -178,11 +183,10 @@ struct aria_globalstat {
 	uint64_t download_speed_limit;
 	uint64_t upload_speed_limit;
 
-	uint64_t upload_total;
+	uint64_t uploaded_total;
 	/* uint64_t progress_total_total;
 	uint64_t progress_have_total; */
 	uint64_t have_total;
-	uint8_t compute_total;
 
 	unsigned optimize_concurrent: 1;
 	unsigned save_session: 1;
@@ -322,6 +326,9 @@ unref_download(struct aria_download *d)
 static void
 clear_downloads(void)
 {
+	globalstat.have_total = 0;
+	globalstat.uploaded_total = 0;
+
 	while (num_downloads > 0)
 		unref_download(downloads[--num_downloads]);
 }
@@ -508,35 +515,25 @@ on_notification(char const *method, struct json_node *event)
 	char *const gid = json_get(event, "gid")->val.str;
 	struct aria_download **dd = find_download_bygid(gid, 1);
 	struct aria_download *d;
-	int newstatus;
+	int8_t newstatus;
+
+	static int8_t const STATUS_MAP[] = {
+		/* K_notification_none               */ DOWNLOAD_UNKNOWN,
+		/* K_notification_DownloadStart      */ DOWNLOAD_ACTIVE,
+		/* K_notification_DownloadPause      */ DOWNLOAD_PAUSED,
+		/* K_notification_DownloadStop       */ DOWNLOAD_PAUSED,
+		/* K_notification_DownloadComplete   */ DOWNLOAD_COMPLETE,
+		/* K_notification_DownloadError      */ DOWNLOAD_ERROR,
+		/* K_notification_BtDownloadComplete */ DOWNLOAD_COMPLETE
+	};
 
 	if (NULL == dd)
 		return;
 	d = *dd;
 
-	if (0 == strcmp(method, "aria2.onDownloadStart")) {
-		newstatus = DOWNLOAD_ACTIVE;
+	newstatus = STATUS_MAP[K_notification_from(method + strlen("aria2.on"))];
 
-	} else if (0 == strcmp(method, "aria2.onDownloadPause")) {
-		newstatus = DOWNLOAD_PAUSED;
-
-	} else if (0 == strcmp(method, "aria2.onDownloadStop")) {
-		newstatus = DOWNLOAD_PAUSED;
-
-	} else if (0 == strcmp(method, "aria2.onDownloadComplete")) {
-		newstatus = DOWNLOAD_COMPLETE;
-
-	} else if (0 == strcmp(method, "aria2.onDownloadError")) {
-		newstatus = DOWNLOAD_ERROR;
-
-	} else if (0 == strcmp(method, "aria2.onBtDownloadComplete")) {
-		newstatus = DOWNLOAD_COMPLETE;
-
-	} else {
-		return;
-	}
-
-	if (newstatus != d->status) {
+	if (newstatus != DOWNLOAD_UNKNOWN && newstatus != d->status) {
 		d->status = -newstatus;
 		on_download_status_change(d);
 	}
@@ -801,22 +798,43 @@ parse_peer(struct aria_peer *p, struct json_node *node)
 {
 	struct json_node *field = json_children(node);
 	do {
-		if (0 == strcmp(field->key, "peerId"))
+		switch (K_peer_from(field->key)) {
+		case K_peer_none:
+			/* ignore */
+			break;
+
+		case K_peer_peerId:
 			parse_peer_id(p, field->val.str);
-		else if (0 == strcmp(field->key, "ip"))
+			break;
+
+		case K_peer_ip:
 			strncpy(p->ip, field->val.str, sizeof p->ip - 1);
-		else if (0 == strcmp(field->key, "port"))
+			break;
+
+		case K_peer_port:
 			p->port = strtoul(field->val.str, NULL, 10);
-		else if (0 == strcmp(field->key, "bitfield"))
+			break;
+
+		case K_peer_bitfield:
 			parse_peer_bitfield(p, field->val.str);
-		else if (0 == strcmp(field->key, "amChoking"))
-			p->up_choked = 0 == strcmp(field->val.str, "true");
-		else if (0 == strcmp(field->key, "peerChoking"))
-			p->down_choked = 0 == strcmp(field->val.str, "true");
-		else if (0 == strcmp(field->key, "downloadSpeed"))
-			p->download_speed = strtoul(field->val.str, NULL, 10);
-		else if (0 == strcmp(field->key, "uploadSpeed"))
-			p->upload_speed = strtoul(field->val.str, NULL, 10);
+			break;
+
+		case K_peer_amChoking:
+			p->up_choked = IS_TRUE(field->val.str);
+			break;
+
+		case K_peer_peerChoking:
+			p->down_choked = IS_TRUE(field->val.str);
+			break;
+
+		case K_peer_downloadSpeed:
+			p->download_speed = strtoull(field->val.str, NULL, 10);
+			break;
+
+		case K_peer_uploadSpeed:
+			p->upload_speed = strtoull(field->val.str, NULL, 10);
+			break;
+		}
 	} while (NULL != (field = json_next(field)));
 }
 
@@ -1024,18 +1042,33 @@ parse_download_files(struct aria_download *d, struct json_node *node)
 		file.uris = NULL;
 
 		do {
-			if (0 == strcmp(field->key, "index"))
+			switch (K_files_from(field->key)) {
+			case K_files_none:
+				/* ignore */
+				break;
+
+			case K_files_index:
 				index = atoi(field->val.str) - 1;
-			else if (0 == strcmp(field->key, "path"))
+				break;
+
+			case K_files_path:
 				file.path = strlen(field->val.str) > 0 ? strdup(field->val.str) : NULL;
-			else if (0 == strcmp(field->key, "length"))
+				break;
+
+			case K_files_length:
 				file.total = strtoull(field->val.str, NULL, 10);
-			else if (0 == strcmp(field->key, "completedLength"))
+				break;
+
+			case K_files_completedLength:
 				file.have = strtoull(field->val.str, NULL, 10);
-			else if (0 == strcmp(field->key, "selected")) {
-				file.selected = 0 == strcmp(field->val.str, "true");
+				break;
+
+			case K_files_selected:
+				file.selected = IS_TRUE(field->val.str);
 				d->num_selfiles += file.selected;
-			} else if (0 == strcmp(field->key, "uris")) {
+				break;
+
+			case K_files_uris: {
 				struct json_node *uris;
 				uint32_t uriidx = 0;
 
@@ -1068,8 +1101,8 @@ parse_download_files(struct aria_download *d, struct json_node *node)
 					file.uris[uriidx++] = u;
 				} while (NULL != (uris = json_next(uris)));
 			}
-			else
-				assert(!"unknown key in file");
+				break;
+			}
 		} while (NULL != (field = json_next(field)));
 
 		assert(index >= 0);
@@ -1089,16 +1122,25 @@ parse_download(struct aria_download *d, struct json_node *node)
 	d->verified = 0;
 
 	do {
-		if (0 == strcmp(field->key, "gid")) {
+		switch (K_download_from(field->key)) {
+		case K_download_gid:
 			assert(strlen(field->val.str) == sizeof d->gid - 1);
 			memcpy(d->gid, field->val.str, sizeof d->gid);
-		} else if (0 == strcmp(field->key, "files")) {
+			break;
+
+		case K_download_files:
 			parse_download_files(d, field);
-		} else if (0 == strcmp(field->key, "numPieces")) {
+			break;
+
+		case K_download_numPieces:
 			d->num_pieces = strtoul(field->val.str, NULL, 10);
-		} else if (0 == strcmp(field->key, "pieceLength")) {
+			break;
+
+		case K_download_pieceLength:
 			d->piece_size = strtoul(field->val.str, NULL, 10);
-		} else if (0 == strcmp(field->key, "bittorrent")) {
+			break;
+
+		case K_download_bittorrent: {
 			struct json_node *bt_info, *bt_name;
 
 			free(d->name);
@@ -1107,40 +1149,81 @@ parse_download(struct aria_download *d, struct json_node *node)
 			if (NULL != (bt_info = json_get(field, "info")) &&
 			    NULL != (bt_name = json_get(bt_info, "name")))
 				d->name = strdup(bt_name->val.str);
-		} else if (0 == strcmp(field->key, "status")) {
-#define IS(statusstr, STATUS) \
-	if (0 == strcmp(field->val.str, #statusstr)) \
-		d->status = d->status != DOWNLOAD_##STATUS ? -DOWNLOAD_##STATUS : d->status;
-			IS(active, ACTIVE);
-			IS(waiting, WAITING);
-			IS(paused, PAUSED);
-			IS(error, ERROR);
-			IS(complete, COMPLETE);
-			IS(removed, REMOVED);
-#undef IS
 		}
-#define else_if_FIELD(local, name, type) \
-else if (0 == strcmp(field->key, name)) \
-	d->local = strto##type(field->val.str, NULL, 10);
-		else_if_FIELD(download_speed, "downloadSpeed", ul)
-		else_if_FIELD(upload_speed, "uploadSpeed", ul)
-		else_if_FIELD(total, "totalLength", ull)
-		else_if_FIELD(have, "completedLength", ull)
-		else_if_FIELD(uploaded, "uploadLength", ull)
-		else_if_FIELD(num_connections, "connections", ul)
-		else_if_FIELD(verified, "verifiedLength", ul)
-#undef else_if_FIELD
-		else if (0 == strcmp(field->key, "verifyIntegrityPending")) {
+			break;
+
+		case K_download_status: {
+			static int8_t const STATUS_MAP[] = {
+				/* K_status_none     */ DOWNLOAD_UNKNOWN,
+				/* K_status_active   */ DOWNLOAD_ACTIVE,
+				/* K_status_waiting  */ DOWNLOAD_WAITING,
+				/* K_status_paused   */ DOWNLOAD_PAUSED,
+				/* K_status_error    */ DOWNLOAD_ERROR,
+				/* K_status_complete */ DOWNLOAD_COMPLETE,
+				/* K_status_removed  */ DOWNLOAD_REMOVED
+			};
+			int8_t newstatus = STATUS_MAP[K_status_from(field->val.str)];
+			if (newstatus != d->status)
+				d->status = -newstatus;
+		}
+			break;
+
+		case K_download_completedLength:
+			globalstat.have_total -= d->have;
+			d->have = strtoull(field->val.str, NULL, 10);
+			globalstat.have_total += d->have;
+			break;
+
+		case K_download_uploadLength:
+			globalstat.uploaded_total -= d->uploaded;
+			d->uploaded = strtoull(field->val.str, NULL, 10);
+			globalstat.uploaded_total += d->uploaded;
+			break;
+
+		case K_download_verifyIntegrityPending:
 			d->verified = UINT64_MAX;
-		} else if (0 == strcmp(field->key, "following")) {
+			break;
+
+		case K_download_following: {
 			struct aria_download **dd = find_download_bygid(field->val.str, 0);
 			d->following = NULL != dd ? *dd : NULL;
-		} else if (0 == strcmp(field->key, "belongsTo")) {
+			break;
+		}
+
+		case K_download_belongsTo: {
 			struct aria_download **dd = find_download_bygid(field->val.str, 0);
 			d->belongs_to = NULL != dd ? *dd : NULL;
-		} else if (0 == strcmp(field->key, "errorMessage")) {
+			break;
+		}
+
+		case K_download_errorMessage:
 			free(d->error_message);
 			d->error_message = strdup(field->val.str);
+			break;
+
+		case K_download_downloadSpeed:
+			d->download_speed = strtoul(field->val.str, NULL, 10);
+			break;
+
+		case K_download_uploadSpeed:
+			d->upload_speed = strtoul(field->val.str, NULL, 10);
+			break;
+
+		case K_download_totalLength:
+			d->total = strtoull(field->val.str, NULL, 10);
+			break;
+
+		case K_download_connections:
+			d->num_connections = strtoul(field->val.str, NULL, 10);
+			break;
+
+		case K_download_verifiedLength:
+			d->verified = strtoul(field->val.str, NULL, 10);
+			break;
+
+		case K_download_none:
+			/* ignore */
+			break;
 		}
 	} while (NULL != (field = json_next(field)));
 
@@ -1175,17 +1258,35 @@ parse_global_stat(struct json_node *node)
 	/* First kv-pair.  */
 	node = json_children(node);
 	do {
-		if (0);
-#define else_if_FIELD(field, name, type) \
-else if (0 == strcmp(node->key, name)) \
-	globalstat.field = strto##type(node->val.str, NULL, 10);
-		else_if_FIELD(download_speed, "downloadSpeed", ul)
-		else_if_FIELD(upload_speed, "uploadSpeed", ul)
-		else_if_FIELD(num_active, "numActive", ul)
-		else_if_FIELD(num_waiting, "numWaiting", ul)
-		else_if_FIELD(num_stopped, "numStopped", ul)
-		else_if_FIELD(num_stopped_total, "numStoppedTotal", ul)
-#undef else_if_FIELD
+		switch (K_global_from(node->key)) {
+		case K_global_none:
+			/* ignore */
+			break;
+
+		case K_global_downloadSpeed:
+			globalstat.download_speed = strtoull(node->val.str, NULL, 10);
+			break;
+
+		case K_global_uploadSpeed:
+			globalstat.upload_speed = strtoull(node->val.str, NULL, 10);
+			break;
+
+		case K_global_numActive:
+			globalstat.num_active = strtoul(node->val.str, NULL, 10);
+			break;
+
+		case K_global_numWaiting:
+			globalstat.num_waiting = strtoul(node->val.str, NULL, 10);
+			break;
+
+		case K_global_numStopped:
+			globalstat.num_stopped = strtoul(node->val.str, NULL, 10);
+			break;
+
+		case K_global_numStoppedTotal:
+			globalstat.num_stopped_total = strtoul(node->val.str, NULL, 10);
+			break;
+		}
 	} while (NULL != (node = json_next(node)));
 }
 
@@ -1201,27 +1302,54 @@ static void
 parse_option(char const *option, char const *value, struct aria_download *d)
 {
 	if (NULL != d) {
-		if (0 == strcmp(option, "max-download-limit"))
+		switch (K_option_from(option)) {
+		default:
+			/* ignore */
+			break;
+
+		case K_option_max__download__limit:
 			d->download_speed_limit = atol(value);
-		else if (0 == strcmp(option, "max-upload-limit"))
+			break;
+
+		case K_option_max__upload__limit:
 			d->upload_speed_limit = atol(value);
-		else if (0 == strcmp(option, "dir")) {
+			break;
+
+		case K_option_dir:
 			free(d->dir), d->dir = strdup(value);
 			update_tags(d);
+			break;
 		}
 	} else {
-		if (0 == strcmp(option, "max-concurrent-downloads"))
+		switch (K_option_from(option)) {
+		default:
+			/* ignore */
+			break;
+
+		case K_option_max__concurrent__downloads:
 			globalstat.max_concurrenct = atol(value);
-		else if (0 == strcmp(option, "save-session"))
-			globalstat.save_session = 0 == strcmp(value, "true");
-		else if (0 == strcmp(option, "optimize-concurrent-downloads"))
-			globalstat.optimize_concurrent = 0 == strcmp(value, "true");
-		else if (0 == strcmp(option, "max-overall-download-limit"))
+			break;
+
+		case K_option_save__session:
+			globalstat.save_session = IS_TRUE(value);
+			break;
+
+		case K_option_optimize__concurrent__downloads:
+			globalstat.optimize_concurrent = IS_TRUE(value);
+			break;
+
+		case K_option_max__overall__download__limit:
 			globalstat.download_speed_limit = atol(value);
-		else if (0 == strcmp(option, "max-overall-upload-limit"))
+			break;
+
+		case K_option_max__overall__upload__limit:
 			globalstat.upload_speed_limit = atol(value);
-		else if (0 == strcmp(option, "dir"))
+			break;
+
+		case K_option_dir:
 			is_local = 0 == access(value, R_OK | W_OK | X_OK);
+			break;
+		}
 	}
 }
 
@@ -1268,7 +1396,6 @@ parse_downloads(struct json_node *result, struct periodic_arg *arg)
 				result = json_next(result);
 			continue;
 		}
-
 		d = *dd;
 
 		/* these fields are not included in response if not
@@ -1310,48 +1437,13 @@ parse_downloads(struct json_node *result, struct periodic_arg *arg)
 }
 
 static void
-compute_global(void)
-{
-	struct aria_download **dd = downloads;
-	struct aria_download **const end = &downloads[num_downloads];
-
-	globalstat.have_total = 0;
-	globalstat.upload_total = 0;
-
-	for (; dd < end; ++dd) {
-		struct aria_download const *const d = *dd;
-		globalstat.have_total += d->have;
-		globalstat.upload_total += d->uploaded;
-	}
-
-	/* reset counter */
-	globalstat.compute_total = 0;
-}
-
-static void
 on_periodic(struct json_node *result, struct periodic_arg *arg)
 {
 	if (NULL == result)
-		goto out;
+		goto free_arg;
 
-	/* Result is an array. Go to the first element. */
 	result = json_children(result);
 	parse_global_stat(result);
-
-	/* there is some activity so we need to recount soon */
-	if (globalstat.upload_speed > 0 || globalstat.download_speed > 0)
-		compute_global();
-
-	if (globalstat.compute_total > 0)
-		compute_global();
-
-#if 0
-		++globalstat.compute_total;
-	/* activity stopped but there was some before. let's update. */
-	else if (globalstat.compute_total > 0)
-		compute_global();
-
-#endif
 
 	result = json_next(result);
 	if (NULL != result) {
@@ -1363,7 +1455,7 @@ on_periodic(struct json_node *result, struct periodic_arg *arg)
 
 	refresh();
 
-out:
+free_arg:
 	free(arg);
 }
 
@@ -1430,9 +1522,6 @@ update_delta(int all)
 
 		for (i = 0; i < n; ++i, ++dd, ++arg) {
 			struct aria_download *d = *dd;
-
-			if (d->status < 0)
-				globalstat.compute_total = 1;
 
 			json_write_beginobj(jw);
 			json_write_key(jw, "methodName");
@@ -1639,6 +1728,9 @@ remove_download_at(struct aria_download **dd)
 		tag_col_width = 0;
 		longest_tag = NULL;
 	}
+
+	globalstat.have_total -= d->have;
+	globalstat.uploaded_total -= d->uploaded;
 
 	unref_download(d);
 }
@@ -2423,11 +2515,11 @@ draw_statusline(void)
 	mvaddnstr(y, x -= n, fmtbuf, n);
 
 	mvaddstr(y, x -= 4, "] @ ");
-	n = fmt_percent(fmtbuf, globalstat.upload_total, globalstat.have_total);
+	n = fmt_percent(fmtbuf, globalstat.uploaded_total, globalstat.have_total);
 	mvaddnstr(y, x -= n, fmtbuf, n);
 	mvaddstr(y, x -= 1, "[");
 
-	n = fmt_speed(fmtbuf, globalstat.upload_total);
+	n = fmt_speed(fmtbuf, globalstat.uploaded_total);
 	mvaddnstr(y, x -= n, fmtbuf, n);
 
 	mvaddstr(y, x -= 3, " ↑ ");
@@ -2484,6 +2576,9 @@ on_update_all(struct json_node *result, void *arg)
 	}
 
 	result = json_children(result);
+	parse_global_stat(result);
+
+	result = json_next(result);
 	do {
 		struct json_node *downloads_list;
 		struct json_node *node;
@@ -3052,6 +3147,18 @@ update_all(void)
 	json_write_beginarr(jw);
 	/* 1st arg: “methods” */
 	json_write_beginarr(jw); /* {{{ */
+
+	{
+		json_write_beginobj(jw);
+		json_write_key(jw, "methodName");
+		json_write_str(jw, "aria2.getGlobalStat");
+		json_write_key(jw, "params");
+		json_write_beginarr(jw);
+		/* “secret” */
+		json_write_str(jw, secret_token);
+		json_write_endarr(jw);
+		json_write_endobj(jw);
+	}
 
 	for (n = 0;;++n) {
 		char *tell;

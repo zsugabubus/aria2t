@@ -12,6 +12,15 @@ minimal but complete.
 
 ## Dependencies
 
+### Build
+
+* `sh`
+* `sed`
+* `coreutils`
+* `gperf`
+
+### Runtime
+
 * `ncursesw`
 
 ## Installation

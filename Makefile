@@ -7,18 +7,19 @@ GZIP ?= gzip --best --force
 PKGCONFIG ?= pkg-config
 
 TARGETS := aria2t
-CFLAGS += -g -O2 -pedantic -Wall -Wextra
+CFLAGS += -std=c89 -g -O2 -pedantic -Wall -Wextra
+
+PACKAGES := ncursesw
+LDLIBS += -lncursesw
+# LDLIBS  += $(shell $(PKGCONFIG) --libs $(PACKAGES))
+LDFLAGS += $(shell $(PKGCONFIG) --cflags $(PACKAGES))
 
 all : $(TARGETS)
 
-aria2t : CFLAGS += -std=c89
-aria2t : PACKAGES := ncursesw
+keys.in : aria2t.c genkeys
+	./genkeys
 
-# WATTAFUCK?!
-# $(TARGETS) : LDLIBS  += $(shell $(PKGCONFIG) --libs $(PACKAGES))
-$(TARGETS) : LDLIBS += -lncursesw
-$(TARGETS) : LDFLAGS += $(shell $(PKGCONFIG) --cflags $(PACKAGES))
-$(TARGETS) : %: %.c program.? format.? websocket.? b64.? jeezson/jeezson.? Makefile
+$(TARGETS) : %: keys.in %.c program.? format.? websocket.? b64.? jeezson/jeezson.? Makefile
 	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $(LDLIBS) $@.c program.c format.c websocket.c b64.c jeezson/jeezson.c
 
 bootstrap :
@@ -33,6 +34,6 @@ uninstall :
 	$(RM) $(patsubst %,$(DESTDIR)$(PREFIX)/%,$(TARGETS)) $(patsubst %,$(DESTDIR)$(MANPREFIX)/man1/%.1.gz,$(TARGETS))
 
 clean :
-	$(RM) $(TARGETS)
+	$(RM) *.in $(TARGETS)
 
 .PHONY: all bootstrap install uninstall clean
