@@ -2595,6 +2595,8 @@ run_action(struct aria_download *d, const char *name, ...)
 	while (-1 == waitpid(pid, &status, 0) && errno == EINTR)
 		;
 
+	/* become foreground process */
+	tcsetpgrp(STDERR_FILENO, getpgrp());
 	refresh();
 
 	if (WIFEXITED(status) && 127 == WEXITSTATUS(status)) {
