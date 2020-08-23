@@ -1884,16 +1884,20 @@ draw_file(struct aria_download const *d, size_t i, int *y)
 
 		for (k = 0; k < u->num_servers; ++k) {
 			struct aria_server const *s = &u->servers[k];
-			char szspeed[6];
+			char fmtbuf[5];
+			int n;
 
-			szspeed[fmt_speed(szspeed, s->download_speed)] = '\0';
+			mvprintw((*y)++, 0, "      %s   ↓  ",
+					j + 1 < f->num_uris ? "│" : " ");
+
+			attr_set(A_BOLD, COLOR_DOWN, NULL);
+			n = fmt_speed(fmtbuf, s->download_speed);
+			addnstr(fmtbuf, n);
+			attr_set(A_NORMAL, 0, NULL);
+
 			if (NULL != s->current_uri)
-				mvprintw((*y)++, 0, "      %s   ↪ %s",
-						j + 1 < f->num_uris ? "│" : " ",
-						s->current_uri);
-			mvprintw((*y)++, 0, "      %s   %s",
-					j + 1 < f->num_uris ? "│" : " ",
-					szspeed);
+				printw(" ↪ %s", s->current_uri);
+
 			clrtoeol();
 		}
 	}
