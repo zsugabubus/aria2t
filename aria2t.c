@@ -1523,9 +1523,9 @@ update_delta(int all)
 
 			arg->has_get_peers = 0;
 			arg->has_get_servers = 0;
-			if (NULL != d->name
+			if ((DOWNLOAD_ACTIVE == abs(d->status) || d->status < 0) && (NULL != d->name
 			    ? (arg->has_get_peers = ('p' == view))
-			    : (arg->has_get_servers = ('f' == view))) {
+			    : (arg->has_get_servers = ('f' == view)))) {
 				json_write_beginobj(jw);
 				json_write_key(jw, "methodName");
 				json_write_str(jw, NULL != d->name ? "aria2.getPeers" : "aria2.getServers");
