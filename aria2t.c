@@ -2557,7 +2557,7 @@ runaction_maychanged(struct aria_download *d)
  * - =0: action executed and terminated successfully.
  * - >0: action executed but failed. */
 static int
-run_action(struct aria_download *d, const char *name, ...)
+run_action(struct aria_download *d, char const *name, ...)
 {
 	char filename[PATH_MAX];
 	char filepath[PATH_MAX];
@@ -2584,7 +2584,7 @@ run_action(struct aria_download *d, const char *name, ...)
 	def_prog_mode();
 	endwin();
 
-	if (0 == (pid = fork())) {
+	if (0 == (pid = vfork())) {
 		execlp(filepath, filepath,
 				NULL != d ? d->gid : "",
 				session_file,
@@ -2603,6 +2603,7 @@ run_action(struct aria_download *d, const char *name, ...)
 		return -1;
 	} else if (WIFEXITED(status) && EXIT_SUCCESS == WEXITSTATUS(status)) {
 		runaction_maychanged(d);
+		refresh();
 		return EXIT_SUCCESS;
 	} else {
 		return EXIT_FAILURE;
