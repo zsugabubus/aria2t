@@ -24,9 +24,7 @@ $(TARGETS) : %: %.c program.? format.? websocket.? b64.? jeezson/jeezson.? Makef
 bootstrap :
 	git submodule update --init --recursive
 
-install : $(patsubst aria2%,install-%,$(TARGETS))
-
-install-% : aria2%
+install : aria2t
 	$(INSTALL) -Ds -t $(DESTDIR)$(PREFIX)/bin $<
 	$(INSTALL) -Dm644 -t $(DESTDIR)$(MANPREFIX)/man1 $<.1
 	$(GZIP) $(DESTDIR)$(MANPREFIX)/man1/$<.1
@@ -37,4 +35,4 @@ uninstall :
 clean :
 	$(RM) $(TARGETS)
 
-.PHONY: all bootstrap install install-% uninstall clean
+.PHONY: all bootstrap install uninstall clean

@@ -284,13 +284,14 @@ free_files_of(struct aria_download *d)
 
 	for (i = 0; i < d->num_files; ++i)
 		free_file(&d->files[i]);
+
+	free(d->files);
 }
 
 static void
 free_download(struct aria_download *d)
 {
 	free_files_of(d);
-	free(d->files);
 
 	free_peers(d->peers, d->num_peers);
 	free(d->peers);
@@ -302,14 +303,14 @@ free_download(struct aria_download *d)
 	free(d);
 }
 
-struct aria_download *
+static struct aria_download *
 ref_download(struct aria_download *d)
 {
 	++d->refcnt;
 	return d;
 }
 
-void
+static void
 unref_download(struct aria_download *d)
 {
 	assert(d->refcnt >= 1);
@@ -317,7 +318,7 @@ unref_download(struct aria_download *d)
 		free_download(d);
 }
 
-void
+static void
 clear_downloads(void)
 {
 	while (num_downloads > 0)
@@ -331,7 +332,7 @@ default_handler(struct json_node *result, void *arg)
 	/* just do nothing */
 }
 
-int
+static int
 load_config(void)
 {
 	char *str;
@@ -357,7 +358,7 @@ load_config(void)
 	return 0;
 }
 
-struct aria_download *
+static struct aria_download *
 new_download(void)
 {
 	void *p;
@@ -822,18 +823,16 @@ static void
 parse_peers(struct aria_download *d, struct json_node *node)
 {
 	struct aria_peer *p;
-	uint32_t num_oldpeers;
 	struct timespec now;
+	uint32_t num_oldpeers;
 	struct aria_peer *oldpeers;
 
 	num_oldpeers = d->num_peers;
-	d->num_peers = json_len(node);
-	if (NULL == (p = malloc(d->num_peers * sizeof *(d->peers)))) {
-		free(d->peers), d->peers = NULL;
-		return;
-	}
 	oldpeers = d->peers;
-	d->peers = p;
+
+	d->num_peers = json_len(node);
+	if (NULL == (d->peers = malloc(d->num_peers * sizeof *(d->peers))))
+		goto free_oldpeers;
 
 	if (json_isempty(node))
 		goto free_oldpeers;
@@ -847,6 +846,7 @@ parse_peers(struct aria_download *d, struct json_node *node)
 		&now
 	);
 
+	p = d->peers;
 	node = json_children(node);
 	do {
 		struct aria_peer *oldp;
@@ -1003,19 +1003,12 @@ update_display_name(struct aria_download *d)
 static void
 parse_download_files(struct aria_download *d, struct json_node *node)
 {
-	void *p;
-
 	free_files_of(d);
 
 	d->num_files = json_len(node);
 	d->num_selfiles = 0;
-	if (NULL == (p = realloc(d->files, d->num_files * sizeof *(d->files)))) {
-		d->num_files = 0;
-		free(d->files), d->files = NULL;
+	if (NULL == (d->files = malloc(d->num_files * sizeof *(d->files))))
 		return;
-	} else {
-		d->files = p;
-	}
 
 	if (json_isempty(node))
 		return;
