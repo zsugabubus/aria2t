@@ -184,9 +184,9 @@ struct aria_globalstat {
 	uint64_t have_total;
 	uint8_t compute_total;
 
-	unsigned optimize_concurrency: 1;
+	unsigned optimize_concurrent: 1;
 	unsigned save_session: 1;
-	uint32_t max_concurrency;
+	uint32_t max_concurrenct;
 
 	uint32_t num_active;
 	uint32_t num_waiting;
@@ -1217,11 +1217,11 @@ parse_option(char const *option, char const *value, struct aria_download *d)
 		}
 	} else {
 		if (0 == strcmp(option, "max-concurrent-downloads"))
-			globalstat.max_concurrency = atol(value);
+			globalstat.max_concurrenct = atol(value);
 		else if (0 == strcmp(option, "save-session"))
 			globalstat.save_session = 0 == strcmp(value, "true");
 		else if (0 == strcmp(option, "optimize-concurrent-downloads"))
-			globalstat.optimize_concurrency = 0 == strcmp(value, "true");
+			globalstat.optimize_concurrent = 0 == strcmp(value, "true");
 		else if (0 == strcmp(option, "max-overall-download-limit"))
 			globalstat.download_speed_limit = atol(value);
 		else if (0 == strcmp(option, "max-overall-upload-limit"))
@@ -2393,8 +2393,8 @@ draw_statusline(void)
 			globalstat.num_stopped,
 			is_local ? "L" : "",
 			globalstat.save_session ? "S" : "",
-			globalstat.optimize_concurrency ? "O" : "",
-			globalstat.max_concurrency,
+			globalstat.optimize_concurrent ? "O" : "",
+			globalstat.max_concurrenct,
 			remote_host, remote_port,
 			ws_isalive() ? "" : " (not connected)");
 
