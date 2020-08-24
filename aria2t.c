@@ -152,7 +152,6 @@ struct aria_download {
 	uint32_t num_files;
 	uint32_t num_selfiles;
 
-	/* uint32_t num_seeders; */
 	uint32_t num_connections;
 
 	uint32_t num_peers;
@@ -184,8 +183,6 @@ struct aria_globalstat {
 	uint64_t upload_speed_limit;
 
 	uint64_t uploaded_total;
-	/* uint64_t progress_total_total;
-	uint64_t progress_have_total; */
 	uint64_t have_total;
 
 	unsigned optimize_concurrent: 1;
@@ -576,9 +573,6 @@ on_ws_message(char *msg, uint64_t msglen)
 	} else {
 		assert(0);
 	}
-
-	/* json_debug(nodes, 0); */
-	/* json_debug(json_get(json_get(nodes, "result"), "version"), 0); */
 }
 
 static struct rpc_request *
@@ -745,8 +739,6 @@ parse_file_servers(struct aria_file *f, struct json_node *node)
 				s.download_speed = strtoul(field->val.str, NULL, 10);
 			else if (0 == strcmp(field->key, "currentUri"))
 				s.current_uri = field->val.str;
-			else
-				assert(!"unknown key in getServers([])");
 		} while (NULL != (field = json_next(field)));
 
 		if (0 == strcmp(u->uri, s.current_uri))
@@ -962,8 +954,6 @@ parse_servers(struct aria_download *d, struct json_node *node)
 					fileidx = atoi(field->val.str) - 1;
 				else if (0 == strcmp(field->key, "servers"))
 					servers = field;
-				else
-					assert(!"unknown key in getServers()");
 			} while (NULL != (field = json_next(field)));
 
 			assert(fileidx < d->num_files);
@@ -1180,10 +1170,6 @@ parse_download(struct aria_download *d, struct json_node *node)
 			globalstat.uploaded_total += d->uploaded;
 			break;
 
-		case K_download_verifyIntegrityPending:
-			d->verified = UINT64_MAX;
-			break;
-
 		case K_download_following: {
 			struct aria_download **dd = find_download_bygid(field->val.str, 0);
 			d->following = NULL != dd ? *dd : NULL;
@@ -1221,6 +1207,10 @@ parse_download(struct aria_download *d, struct json_node *node)
 			d->verified = strtoul(field->val.str, NULL, 10);
 			break;
 
+		case K_download_verifyIntegrityPending:
+			d->verified = UINT64_MAX;
+			break;
+
 		case K_download_none:
 			/* ignore */
 			break;
@@ -1239,7 +1229,6 @@ parse_options(struct json_node *node, parse_options_cb cb, void *arg)
 	if (json_isempty(node))
 		return;
 
-	/* First kv-pair.  */
 	node = json_children(node);
 	do {
 		assert("option value must be string" && json_str == json_type(node));
@@ -1253,9 +1242,7 @@ parse_global_stat(struct json_node *node)
 	if (json_arr != json_type(node))
 		return;
 
-	/* Returned object.  */
 	node = json_children(node);
-	/* First kv-pair.  */
 	node = json_children(node);
 	do {
 		switch (K_global_parse(node->key)) {
@@ -1373,10 +1360,6 @@ parse_downloads(struct json_node *result, struct periodic_arg *arg)
 {
 	int some_insufficient = 0;
 
-	if (NULL == result)
-		return;
-
-	/* No more repsonses if no downloads. */
 	for (; NULL != result; result = json_next(result), ++arg) {
 		struct json_node *node;
 		struct aria_download **dd;
@@ -1541,17 +1524,13 @@ update_delta(int all)
 				json_write_str(jw, "status");
 
 			if (NULL == d->name && !d->requested_bittorrent && d->status < 0) {
-				/* if (DOWNLOAD_REMOVED != abs(d->status))
-					json_write_str(jw, "seeder"); */
-
 				json_write_str(jw, "bittorrent");
 				json_write_str(jw, "numPieces");
 				json_write_str(jw, "pieceLength");
 				d->requested_bittorrent = 1;
 			} else if (0 == d->num_files && ((NULL == d->name && d->status >= 0) || is_local)) {
-				/* If “bittorrent.info.name” is empty then
-				 * assign the name of the first file as name.
-				 * */
+				/* if “bittorrent.info.name” is empty then
+				 * assign the name of the first file as name */
 				json_write_str(jw, "files");
 			}
 
@@ -1582,14 +1561,15 @@ update_delta(int all)
 				json_write_str(jw, "verifiedLength");
 				json_write_str(jw, "verifyIntegrityPending");
 
-				if (globalstat.download_speed > 0 ||
-					d->download_speed > 0) {
+				if (d->have != d->total &&
+				    (globalstat.download_speed > 0 ||
+				    d->download_speed > 0)) {
 					json_write_str(jw, "completedLength");
 					json_write_str(jw, "downloadSpeed");
 				}
 
 				if (globalstat.upload_speed > 0 ||
-					d->upload_speed > 0) {
+				    d->upload_speed > 0) {
 					json_write_str(jw, "uploadLength");
 					json_write_str(jw, "uploadSpeed");
 				}
@@ -3518,8 +3498,6 @@ fill_pairs(void)
 	}
 }
 
-/* múlt héten már próbáltam emailben megérdeklődni, hogy lehet-e */
-
 static void
 _endwin(void)
 {
@@ -3737,7 +3715,7 @@ main(int argc, char *argv[])
 				switch (ssi.ssi_signo) {
 				case SIGWINCH:
 					endwin();
-					/* First refresh is for updating changed window size. */
+					/* first refresh is for updating changed window size */
 					refresh();
 					draw_all();
 					refresh();
