@@ -1796,8 +1796,6 @@ aria_remove_result(struct aria_download *d)
 	do_rpc();
 }
 
-/* tsl [title] fsl */
-
 static void draw_main(void)
 {
 	switch (view) {
@@ -2440,12 +2438,50 @@ draw_cursor(void)
 	}
 }
 
+static struct {
+	char const *tsl;
+	char const *fsl;
+} ti;
+
+static void
+update_terminfo(void)
+{
+	if ((char *)-1 == (ti.tsl = tigetstr("tsl")))
+		ti.tsl = NULL;
+	if ((char *)-1 == (ti.fsl = tigetstr("fsl")))
+		ti.fsl = NULL;
+}
+
+static void
+update_title(void)
+{
+	char sdown[5], sup[5];
+	int ndown, nup;
+
+	if (NULL == ti.tsl || NULL == ti.fsl)
+		return;
+
+	ndown = fmt_speed(sdown, globalstat.download_speed);
+	nup = fmt_speed(sup, globalstat.upload_speed);
+	dprintf(STDERR_FILENO,
+			"%s"
+			"↓ %.*s ↑ %.*s @ %s:%u – aria2t"
+			"%s",
+			ti.tsl,
+			ndown, sdown,
+			nup, sup,
+			remote_host, remote_port,
+			ti.fsl);
+}
+
 static void
 draw_statusline(void)
 {
 	int y, x, w;
 	char fmtbuf[5];
 	int n;
+
+	update_title();
 
 	getmaxyx(stdscr, y, w);
 
@@ -3668,6 +3704,8 @@ main(int argc, char *argv[])
 	keypad(stdscr, TRUE);
 	/* 8-bit inputs */
 	meta(stdscr, TRUE);
+
+	update_terminfo();
 
 	json_writer_init(jw);
 
