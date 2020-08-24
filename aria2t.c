@@ -531,7 +531,7 @@ on_notification(char const *method, struct json_node *event)
 		return;
 	d = *dd;
 
-	newstatus = STATUS_MAP[K_notification_from(method + strlen("aria2.on"))];
+	newstatus = STATUS_MAP[K_notification_parse(method + strlen("aria2.on"))];
 
 	if (newstatus != DOWNLOAD_UNKNOWN && newstatus != d->status) {
 		d->status = -newstatus;
@@ -798,7 +798,7 @@ parse_peer(struct aria_peer *p, struct json_node *node)
 {
 	struct json_node *field = json_children(node);
 	do {
-		switch (K_peer_from(field->key)) {
+		switch (K_peer_parse(field->key)) {
 		case K_peer_none:
 			/* ignore */
 			break;
@@ -1042,7 +1042,7 @@ parse_download_files(struct aria_download *d, struct json_node *node)
 		file.uris = NULL;
 
 		do {
-			switch (K_files_from(field->key)) {
+			switch (K_files_parse(field->key)) {
 			case K_files_none:
 				/* ignore */
 				break;
@@ -1122,7 +1122,7 @@ parse_download(struct aria_download *d, struct json_node *node)
 	d->verified = 0;
 
 	do {
-		switch (K_download_from(field->key)) {
+		switch (K_download_parse(field->key)) {
 		case K_download_gid:
 			assert(strlen(field->val.str) == sizeof d->gid - 1);
 			memcpy(d->gid, field->val.str, sizeof d->gid);
@@ -1162,7 +1162,7 @@ parse_download(struct aria_download *d, struct json_node *node)
 				/* K_status_complete */ DOWNLOAD_COMPLETE,
 				/* K_status_removed  */ DOWNLOAD_REMOVED
 			};
-			int8_t newstatus = STATUS_MAP[K_status_from(field->val.str)];
+			int8_t newstatus = STATUS_MAP[K_status_parse(field->val.str)];
 			if (newstatus != d->status)
 				d->status = -newstatus;
 		}
@@ -1258,7 +1258,7 @@ parse_global_stat(struct json_node *node)
 	/* First kv-pair.  */
 	node = json_children(node);
 	do {
-		switch (K_global_from(node->key)) {
+		switch (K_global_parse(node->key)) {
 		case K_global_none:
 			/* ignore */
 			break;
@@ -1302,7 +1302,7 @@ static void
 parse_option(char const *option, char const *value, struct aria_download *d)
 {
 	if (NULL != d) {
-		switch (K_option_from(option)) {
+		switch (K_option_parse(option)) {
 		default:
 			/* ignore */
 			break;
@@ -1321,7 +1321,7 @@ parse_option(char const *option, char const *value, struct aria_download *d)
 			break;
 		}
 	} else {
-		switch (K_option_from(option)) {
+		switch (K_option_parse(option)) {
 		default:
 			/* ignore */
 			break;

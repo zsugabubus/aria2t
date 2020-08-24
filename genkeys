@@ -6,13 +6,13 @@ echo '#pragma GCC diagnostic push'
 echo '#pragma GCC diagnostic ignored "-Wmissing-field-initializers"'
 echo '#pragma GCC diagnostic ignored "-Wunused-parameter"'
 
-sed -n '/K_[a-zA-Z_.-]*_from/{s/.*\(K_[a-zA-Z_.-]*\)_from.*/\1/p}' aria2t.c |
+sed -n '/K_[a-zA-Z_.-]*_parse/{s/.*\(K_[a-zA-Z_.-]*\)_parse.*/\1/p}' aria2t.c |
 sort |
 uniq |
 while read -r name
 do
 	table=$(
-		sed -n '/_\(from\|none\)/! {
+		sed -n '/_\(parse\|none\)/! {
 			/'$name'_[a-zA-Z_.-]*/ {
 				s:.*\('$name'_\([a-zA-Z_.-]*\)\).*:\2,\t\1:
 				: subst_dashes
@@ -44,7 +44,7 @@ struct ${name}_s_ { char const *const name; enum ${name}_e_ const idx; }
 $table
 %%
 static enum ${name}_e_
-${name}_from (register char const *str)
+${name}_parse (register char const *str)
 {
 	register struct ${name}_s_ const *const h = ${name}_lookup_ (str, strlen(str));
 	return NULL != h ? h->idx : ${name}_none;
