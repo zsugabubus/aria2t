@@ -903,7 +903,7 @@ parse_peers(struct aria_download *d, struct json_node *node)
 			bytes_change = pieces_change * d->piece_size;
 			time_ns_change =
 				(now.tv_sec  - oldp->latest_change.tv_sec) * NS_PER_SEC +
-				 now.tv_nsec - oldp->latest_change.tv_nsec;
+				 now.tv_nsec - oldp->latest_change.tv_nsec + 1/*avoid /0*/;
 
 			p->peer_download_speed = (bytes_change * NS_PER_SEC) / time_ns_change;
 
