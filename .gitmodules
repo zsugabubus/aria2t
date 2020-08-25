@@ -1,3 +1,6 @@
 [submodule "jeezson"]
 	path = jeezson
 	url = https://github.com/zsugabubus/jeezson
+[submodule "fourmat"]
+	path = fourmat
+	url = https://github.com/zsugabubus/fourmat

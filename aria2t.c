@@ -24,12 +24,11 @@
 #include <sys/xattr.h>
 #include <time.h>
 
-#include "websocket.h"
-#include "jeezson/jeezson.h"
-
 #include "program.h"
-#include "format.h"
+#include "websocket.h"
 #include "b64.h"
+#include "jeezson/jeezson.h"
+#include "fourmat/fourmat.h"
 
 #include "keys.in"
 

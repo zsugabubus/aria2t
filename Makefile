@@ -19,8 +19,8 @@ all : $(TARGETS)
 keys.in : aria2t.c genkeys
 	./genkeys
 
-$(TARGETS) : %: keys.in %.c program.? format.? websocket.? b64.? jeezson/jeezson.? Makefile
-	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $(LDLIBS) $@.c program.c format.c websocket.c b64.c jeezson/jeezson.c
+$(TARGETS) : %: keys.in %.c program.? websocket.? b64.? jeezson fourmat Makefile
+	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $(LDLIBS) $@.c program.c fourmat/fourmat.c websocket.c b64.c jeezson/jeezson.c
 
 bootstrap :
 	git submodule update --init --recursive
