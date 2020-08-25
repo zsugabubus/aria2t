@@ -7,7 +7,7 @@ GZIP ?= gzip --best --force
 PKGCONFIG ?= pkg-config
 
 TARGETS := aria2t
-CFLAGS += -std=c89 -g -O2 -pedantic -Wall -Wextra
+CFLAGS += -std=c11 -g -O2 -pedantic -Wall -Wextra
 
 PACKAGES := ncursesw
 LDLIBS += -lncursesw

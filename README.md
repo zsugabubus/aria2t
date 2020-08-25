@@ -12,16 +12,12 @@ minimal but complete.
 
 ## Dependencies
 
-### Build
-
-* `sh`
-* `sed`
+* `cc -std=c11`
 * `coreutils`
 * `gperf`
-
-### Runtime
-
+* `make`
 * `ncursesw`
+* `sed`
 
 ## Installation
 ```

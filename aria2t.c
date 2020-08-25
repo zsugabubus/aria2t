@@ -510,21 +510,21 @@ static void
 on_notification(char const *method, struct json_node *event)
 {
 	char *const gid = json_get(event, "gid")->val.str;
-	struct aria_download **dd = find_download_bygid(gid, 1);
+	struct aria_download **dd;
 	struct aria_download *d;
 	int8_t newstatus;
 
 	static int8_t const STATUS_MAP[] = {
-		/* K_notification_none               */ DOWNLOAD_UNKNOWN,
-		/* K_notification_DownloadStart      */ DOWNLOAD_ACTIVE,
-		/* K_notification_DownloadPause      */ DOWNLOAD_PAUSED,
-		/* K_notification_DownloadStop       */ DOWNLOAD_PAUSED,
-		/* K_notification_DownloadComplete   */ DOWNLOAD_COMPLETE,
-		/* K_notification_DownloadError      */ DOWNLOAD_ERROR,
-		/* K_notification_BtDownloadComplete */ DOWNLOAD_COMPLETE
+		[K_notification_none              ] = DOWNLOAD_UNKNOWN,
+		[K_notification_DownloadStart     ] = DOWNLOAD_ACTIVE,
+		[K_notification_DownloadPause     ] = DOWNLOAD_PAUSED,
+		[K_notification_DownloadStop      ] = DOWNLOAD_PAUSED,
+		[K_notification_DownloadComplete  ] = DOWNLOAD_COMPLETE,
+		[K_notification_DownloadError     ] = DOWNLOAD_ERROR,
+		[K_notification_BtDownloadComplete] = DOWNLOAD_COMPLETE
 	};
 
-	if (NULL == dd)
+	if (NULL == (dd = find_download_bygid(gid, 1)))
 		return;
 	d = *dd;
 
@@ -1144,15 +1144,15 @@ parse_download(struct aria_download *d, struct json_node *node)
 
 		case K_download_status: {
 			static int8_t const STATUS_MAP[] = {
-				/* K_status_none     */ DOWNLOAD_UNKNOWN,
-				/* K_status_active   */ DOWNLOAD_ACTIVE,
-				/* K_status_waiting  */ DOWNLOAD_WAITING,
-				/* K_status_paused   */ DOWNLOAD_PAUSED,
-				/* K_status_error    */ DOWNLOAD_ERROR,
-				/* K_status_complete */ DOWNLOAD_COMPLETE,
-				/* K_status_removed  */ DOWNLOAD_REMOVED
+				[K_status_none    ] = DOWNLOAD_UNKNOWN,
+				[K_status_active  ] = DOWNLOAD_ACTIVE,
+				[K_status_waiting ] = DOWNLOAD_WAITING,
+				[K_status_paused  ] = DOWNLOAD_PAUSED,
+				[K_status_error   ] = DOWNLOAD_ERROR,
+				[K_status_complete] = DOWNLOAD_COMPLETE,
+				[K_status_removed ] = DOWNLOAD_REMOVED
 			};
-			int8_t newstatus = STATUS_MAP[K_status_parse(field->val.str)];
+			int8_t const newstatus = STATUS_MAP[K_status_parse(field->val.str)];
 			if (newstatus != d->status)
 				d->status = -newstatus;
 		}
