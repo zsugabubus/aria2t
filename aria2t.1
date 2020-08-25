@@ -3,25 +3,64 @@
 aria2t \- an aria2c terminal frontend
 
 .SH SYNOPSIS
-.SY aria2t
-.R [OPTIONS]
+.B aria2t
+.RB [\  --force \ ]
+\\
+.RS
+.RB [\  \-\-add \ |
+.br
+.RB \ \  \-\-shutdown \ |
+.br
+.RB \ \ {\ [\  \-\-select
+.RI {\  PATH \ |\  GID \ }...\ ]
+.R [
+.BR \-\-print\-gid \ |
+.BR \-\-pause \ |
+.BR \-\-unpause \ |
+.BR \-\-purge \ ]\ }\ ]
+.RE
 .
 .SH DESCRIPTION
 .B aria2t
 is a low footprint terminal frontend for
 .BR aria2c (1).
 .
+.sp
+Program invocation reads as follows: do action on selected download(s). If no
+action provided, program runs in visual mode. This is the default, main behavior.
+.
+.sp
+Even though
+.B aria2t
+provides such very basic scripting abilities, it is advised to use the RPC
+interface directly.
+.
 .SH OPTIONS
 .TP
-.BI \-\-select-gid\  gid
-Select download with
-.IR gid .
+\-\-force
+Refer to
+.BR ! " key."
+.TP
+\-\-add
+Add URIs from standard input. Same as
+.BR a ,\  A \ and\  + ,
+except it does not invoke any actions.
 .
 .TP
-.BI \-\-select-file\  path
-Select download matching
-.IR path
-and switch to file view.
+\-\-shutdown
+Same as
+.BR q ,
+except it does not invoke any actions.
+.
+.TP
+\-\-select { \fIPATH\fR | \fIGID\fR }...
+Select downloads by their \fIGID\fR or by matching \fIPATH\fR prefix. If omitted, every download is selected.
+.
+.TP
+\-\-print\-*\fR, \fB--pause\fR, \fB--unpause\fR, \fB--purge
+Take these self-describing actions on
+.BR \-\-select ed
+downloads.
 .
 .SH TERMINOLOGY
 .SS Session file
