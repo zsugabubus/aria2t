@@ -1,28 +1,23 @@
+#define _GNU_SOURCE
 #include <assert.h>
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <locale.h>
 #include <ncurses.h>
-#include <poll.h>
-#include <signal.h>
+#include <netinet/in.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
-#include <unistd.h>
-#include <limits.h>
-#ifdef __linux__
-#include <sys/prctl.h>
-#include <sys/signalfd.h>
-#endif
-#include <stdint.h>
-#include <netinet/in.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <sys/xattr.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "program.h"
 #include "websocket.h"
@@ -69,13 +64,6 @@ static struct {
 } action;
 
 static char session_file[PATH_MAX];
-static struct pollfd fds[
-#ifdef __linux__
-	3
-#else
-	2
-#endif
-];
 
 #define COLOR_DOWN 1
 #define COLOR_UP   2
@@ -3735,10 +3723,19 @@ remote_info(void)
 	do_rpc();
 }
 
+static void
+setasync(int fd)
+{
+	fcntl(fd, F_SETFL, O_ASYNC | O_NONBLOCK | fcntl(fd, F_GETFL));
+	fcntl(fd, F_SETOWN, getpid());
+	fcntl(fd, F_SETSIG, SIGIO);
+}
+
 void
 on_ws_open(void)
 {
-	fds[1].fd = ws_fileno();
+	assert("eou");
+	setasync(ws_fileno());
 
 	clear_error_message();
 
@@ -3756,8 +3753,6 @@ on_ws_close(void)
 
 	if (act_visual != action.typ)
 		exit(EXIT_FAILURE);
-
-	fds[1].fd = -1;
 
 	clear_rpc_requests();
 
@@ -3785,12 +3780,12 @@ init_action(void)
 int
 main(int argc, char *argv[])
 {
-	sigset_t sigmask;
+	sigset_t ss;
 	int argi;
 
 	setlocale(LC_ALL, "");
 
-	for (argi = 1; argi < argc; ) {
+	for (argi = 1; argi < argc;) {
 		char *arg = argv[argi++];
 		if (0 == strcmp(arg, "--select")) {
 			if (argc <= argi)
@@ -3829,103 +3824,95 @@ main(int argc, char *argv[])
 
 	atexit(cleanup_session_file);
 
-	if (act_visual != action.typ) {
-		try_connect();
+	sigemptyset(&ss);
+	sigaddset(&ss, SIGIO);
+	sigaddset(&ss, SIGWINCH);
+	sigaddset(&ss, SIGINT);
+	sigaddset(&ss, SIGHUP);
+	sigaddset(&ss, SIGTERM);
+	sigaddset(&ss, SIGKILL);
+	sigaddset(&ss, SIGQUIT);
+	sigaddset(&ss, SIGPIPE);
 
-		while (ws_read(), 1);
+	sigprocmask(SIG_BLOCK, &ss, NULL);
+
+	if (act_visual == action.typ) {
+		setasync(STDIN_FILENO);
+
+		atexit(_endwin);
+		newterm(NULL, stderr, stdin);
+		start_color();
+		use_default_colors();
+		fill_pairs();
+		/* no input buffering */
+		raw();
+		/* no input echo */
+		noecho();
+		/* do not translate '\n's */
+		nonl();
+		/* make `getch()` non-blocking */
+		nodelay(stdscr, TRUE);
+		/* catch special keys */
+		keypad(stdscr, TRUE);
+		/* 8-bit inputs */
+		meta(stdscr, TRUE);
+
+		update_terminfo();
+
+		draw_all();
+		refresh();
 	}
-
-	sigemptyset(&sigmask);
-	sigaddset(&sigmask, SIGWINCH);
-	sigaddset(&sigmask, SIGINT);
-	sigaddset(&sigmask, SIGHUP);
-	sigaddset(&sigmask, SIGTERM);
-	sigaddset(&sigmask, SIGQUIT);
-
-	/* block signals to being able to receive it via signalfd() */
-	sigprocmask(SIG_BLOCK, &sigmask, NULL);
-
-	signal(SIGPIPE, SIG_IGN);
-
-	fds[0].fd = STDIN_FILENO;
-	fds[0].events = POLLIN;
-	fds[1].fd = -1;
-	fds[1].events = POLLIN;
-#if __linux__
-	(void)(fds[2].fd = signalfd(-1, &sigmask, SFD_NONBLOCK | SFD_CLOEXEC));
-	fds[2].events = POLLIN;
-#endif
-
-	atexit(_endwin);
-	newterm(NULL, stderr, stdin);
-	start_color();
-	use_default_colors();
-	fill_pairs();
-	/* no input buffering */
-	raw();
-	/* no input echo */
-	noecho();
-	/* do not translate '\n's */
-	nonl();
-	/* make `getch()` non-blocking */
-	nodelay(stdscr, TRUE);
-	/* catch special keys */
-	keypad(stdscr, TRUE);
-	/* 8-bit inputs */
-	meta(stdscr, TRUE);
-
-	update_terminfo();
-
-	draw_all();
-	refresh();
 
 	try_connect();
 
 	for (;;) {
-		int const any_activity = globalstat.download_speed + globalstat.upload_speed > 0;
-		int const timeout = ws_isalive() ? (any_activity ? 1250 : 2500) : 5000;
+		siginfo_t si;
+		int signum;
 
-		switch (poll(fds, array_len(fds), timeout)) {
+		if (act_visual == action.typ) {
+			struct timespec to;
+			int const any_activity = globalstat.download_speed + globalstat.upload_speed > 0;
+
+			to.tv_sec = any_activity ? 1 : 2;
+			to.tv_nsec = (any_activity ? 314 : 718) * 1000000;
+
+			signum = sigtimedwait(&ss, &si, &to);
+		} else {
+			signum = sigwaitinfo(&ss, &si);
+		}
+
+		switch (signum) {
 		case -1:
-			perror("poll");
-			return EXIT_FAILURE;
-
-		case 0:
 			update_delta(1);
-			continue;
-		}
+			break;
 
-		if (fds[0].revents & POLLIN)
-			stdin_read();
-
-		if (fds[1].revents & POLLIN)
-			ws_read();
-
-#ifdef __linux__
-		if (fds[2].revents & POLLIN) {
-			struct signalfd_siginfo ssi;
-
-			while (sizeof ssi == read(fds[2].fd, &ssi, sizeof ssi)) {
-				switch (ssi.ssi_signo) {
-				case SIGWINCH:
-					endwin();
-					/* first refresh is for updating changed window size */
-					refresh();
-					draw_all();
-					refresh();
-					break;
-
-				case SIGINT:
-				case SIGHUP:
-				case SIGTERM:
-				case SIGQUIT:
-					exit(EXIT_SUCCESS);
-				}
-
+		case SIGIO:
+			if (STDIN_FILENO == si.si_fd) {
+				stdin_read();
+			} else {
+				ws_read();
 			}
+			break;
+
+		case SIGWINCH:
+			endwin();
+			/* first refresh is for updating changed window size */
+			refresh();
+			draw_all();
+			refresh();
+			break;
+
+		case SIGINT:
+		case SIGHUP:
+		case SIGTERM:
+		case SIGKILL:
+		case SIGQUIT:
+			exit(EXIT_SUCCESS);
+			break;
+
+		case SIGPIPE:
+			/* ignore */
+			break;
 		}
-#else
-		/* sigtimedwait() */
-#endif
 	}
 }
