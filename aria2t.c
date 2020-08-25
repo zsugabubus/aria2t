@@ -1540,6 +1540,7 @@ update_delta(int all)
 			if (d->status < 0 && d->total == 0) {
 				json_write_str(jw, "totalLength");
 				json_write_str(jw, "completedLength");
+				json_write_str(jw, "downloadSpeed");
 				json_write_str(jw, "uploadLength");
 				json_write_str(jw, "uploadSpeed");
 			}
