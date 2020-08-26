@@ -1510,8 +1510,6 @@ update(void)
 	if (NULL == (req = new_rpc()))
 		return;
 
-	periodic = NULL;
-
 	req->handler = (rpc_handler)on_update;
 
 	json_write_key(jw, "method");
@@ -1534,28 +1532,98 @@ update(void)
 		json_write_endobj(jw);
 	}
 	if (num_downloads > 0) {
-		struct aria_download **dd;
-		int i, n;
+		struct aria_download **top, **lim;
 		struct update_arg *arg;
-		if (view == VIEWS[1]) {
-			dd = &downloads[topidx];
-			n = getmainheight();
+		bool update_offscreen;
+		size_t arglen = 0;
 
-			if ((size_t)(topidx + n) > num_downloads)
-				n = num_downloads - topidx;
+		if (view == VIEWS[1]) {
+			top = &downloads[topidx];
+			lim = top + getmainheight();
+			if (&downloads[num_downloads] < lim)
+				lim = &downloads[num_downloads];
 		} else {
-			dd = &downloads[selidx];
-			n = !!num_downloads;
+			top = &downloads[selidx];
+			lim = top + 1;
 		}
 
-		if (NULL == (arg = malloc(n * sizeof *arg))) {
+		update_offscreen =
+			0 < globalstat.num_perstatus[DOWNLOAD_UNKNOWN] ||
+			((0 < globalstat.download_speed ||
+			  0 < globalstat.upload_speed) &&
+			 (DOWNLOAD_ACTIVE == abs(top[0]->status) ||
+			  DOWNLOAD_ACTIVE == abs(lim[-1]->status)));
+
+		arglen = globalstat.num_perstatus[DOWNLOAD_UNKNOWN] +
+			(lim - top) +
+			(update_offscreen ? globalstat.num_perstatus[DOWNLOAD_ACTIVE] : 0);
+
+		if (NULL == (arg = malloc(arglen * sizeof *arg))) {
 			free_rpc(req);
 			return;
 		}
 		req->arg = arg;
 
-		for (i = 0; i < n; ++i, ++dd, ++arg) {
-			struct aria_download *d = *dd;
+		if (update_offscreen) {
+			struct aria_download **dd = downloads;
+
+			for (;; ++dd) {
+				struct aria_download *d;
+
+				if (dd == top)
+					dd = lim;
+				if (dd == &downloads[num_downloads])
+					break;
+
+				d = *dd;
+
+				if (DOWNLOAD_UNKNOWN != d->status &&
+				    abs(d->status) < DOWNLOAD_ACTIVE)
+					continue;
+
+				if (DOWNLOAD_ACTIVE < abs(d->status))
+					break;
+
+				json_write_beginobj(jw);
+				json_write_key(jw, "methodName");
+				json_write_str(jw, "aria2.tellStatus");
+				json_write_key(jw, "params");
+				json_write_beginarr(jw);
+				/* “secret” */
+				json_write_str(jw, secret_token);
+				/* “gid” */
+				json_write_str(jw, d->gid);
+				/* “keys” */
+				json_write_beginarr(jw);
+
+				switch (abs(d->status)) {
+				case DOWNLOAD_UNKNOWN:
+					json_write_str(jw, "status");
+					break;
+
+				case DOWNLOAD_ACTIVE:
+					if (d->have != d->total)
+						json_write_str(jw, "downloadSpeed");
+					json_write_str(jw, "uploadSpeed");
+					break;
+				}
+
+				json_write_endarr(jw);
+				json_write_endarr(jw);
+				json_write_endobj(jw);
+
+				arg->download = ref_download(d);
+				arg->has_get_peers = 0;
+				arg->has_get_servers = 0;
+				arg->has_get_options = 0;
+				++arg;
+			}
+
+		}
+
+		/* visible downloads */
+		for (; top < lim; ++top, ++arg) {
+			struct aria_download *d = *top;
 
 			json_write_beginobj(jw);
 			json_write_key(jw, "methodName");
@@ -1569,30 +1637,46 @@ update(void)
 			/* “keys” */
 			json_write_beginarr(jw);
 
-			if (DOWNLOAD_REMOVED != abs(d->status))
-				json_write_str(jw, "status");
-
 			if (NULL == d->name && !d->requested_bittorrent && d->status < 0) {
 				json_write_str(jw, "bittorrent");
 				json_write_str(jw, "numPieces");
 				json_write_str(jw, "pieceLength");
 				d->requested_bittorrent = 1;
-			} else if (0 == d->num_files && ((NULL == d->name && d->status >= 0) || is_local)) {
-				/* if “bittorrent.info.name” is empty then
-				 * assign the name of the first file as name */
-				json_write_str(jw, "files");
 			}
 
-			if (view == 'f')
-				if (0 == d->num_files || (d->have != d->total && DOWNLOAD_ACTIVE == abs(d->status)) || d->status < 0)
-					json_write_str(jw, "files");
+			if ((0 == d->num_files && ((NULL == d->name && 0 <= d->status) || is_local)) ||
+			    (view == 'f' && (0 == d->num_files || (d->have != d->total && DOWNLOAD_ACTIVE == d->status) || d->status < 0)))
+				json_write_str(jw, "files");
 
-			if (d->status < 0 && d->total == 0) {
+			if (d->status < 0) {
 				json_write_str(jw, "totalLength");
 				json_write_str(jw, "completedLength");
 				json_write_str(jw, "downloadSpeed");
 				json_write_str(jw, "uploadLength");
 				json_write_str(jw, "uploadSpeed");
+
+				if (-DOWNLOAD_ERROR == d->status)
+					json_write_str(jw, "errorMessage");
+			} else if (DOWNLOAD_ACTIVE == d->status) {
+				if (0 < d->download_speed ||
+				    (0 < globalstat.download_speed && d->have != d->total))
+					json_write_str(jw, "downloadSpeed");
+
+				if (0 < d->download_speed)
+					json_write_str(jw, "completedLength");
+
+				if (0 < globalstat.upload_speed)
+					json_write_str(jw, "uploadSpeed");
+
+				if (0 < d->upload_speed)
+					json_write_str(jw, "uploadLength");
+
+				if (0 == d->upload_speed && 0 == d->download_speed) {
+					json_write_str(jw, "verifiedLength");
+					json_write_str(jw, "verifyIntegrityPending");
+				}
+
+				json_write_str(jw, "connections");
 			}
 
 			if (NULL == d->belongs_to)
@@ -1601,41 +1685,12 @@ update(void)
 			if (NULL == d->following)
 				json_write_str(jw, "following");
 
-			switch (abs(d->status)) {
-			case DOWNLOAD_ERROR:
-				if (d->status < 0 || NULL == d->error_message)
-					json_write_str(jw, "errorMessage");
-				break;
-
-			case DOWNLOAD_ACTIVE:
-				json_write_str(jw, "verifiedLength");
-				json_write_str(jw, "verifyIntegrityPending");
-
-				if (d->have != d->total &&
-				    (globalstat.download_speed > 0 ||
-				    d->download_speed > 0)) {
-					json_write_str(jw, "completedLength");
-					json_write_str(jw, "downloadSpeed");
-				}
-
-				if (globalstat.upload_speed > 0 ||
-				    d->upload_speed > 0) {
-					json_write_str(jw, "uploadLength");
-					json_write_str(jw, "uploadSpeed");
-				}
-
-				json_write_str(jw, "connections");
-				break;
-			}
-			d->status = abs(d->status);
-
 			json_write_endarr(jw);
 
 			json_write_endarr(jw);
 			json_write_endobj(jw);
 
 			arg->download = ref_download(d);
-
 			arg->has_get_peers = 0;
 			arg->has_get_servers = 0;
 			if ((DOWNLOAD_ACTIVE == abs(d->status) || d->status < 0) && (NULL != d->name
@@ -1668,6 +1723,7 @@ update(void)
 				json_write_endobj(jw);
 			}
 
+			d->status = abs(d->status);
 		}
 	} else {
 		req->arg = NULL;
@@ -1677,6 +1733,7 @@ update(void)
 
 	json_write_endarr(jw); /* }}} */
 
+	periodic = NULL;
 	do_rpc();
 }
 
