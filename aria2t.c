@@ -46,6 +46,9 @@ static int oldselidx;
 static int selidx = 0;
 static int topidx = 0;
 
+static struct timespec period;
+static void(*periodic)(void);
+
 static bool is_local; /* server runs on local host */
 
 static struct {
@@ -141,8 +144,10 @@ struct aria_download {
 	char *tags;
 	char gid[16 + 1];
 
-	uint8_t refcnt;
-	unsigned requested_bittorrent: 1;
+	uint8_t deleted: 1; /* strong refs (is on list or not) */
+	uint8_t refcnt; /* weak refs */
+
+	bool requested_bittorrent: 1;
 	/* DOWNLOAD_*; or negative if changed. */
 	int8_t status;
 	uint16_t queue_index;
@@ -314,7 +319,7 @@ unref_download(struct aria_download *d)
 }
 
 static void
-forget_download_at(struct aria_download **dd)
+delete_download_at(struct aria_download **dd)
 {
 	struct aria_download *d = *dd;
 
@@ -329,6 +334,10 @@ forget_download_at(struct aria_download **dd)
 	globalstat.uploaded_total -= d->uploaded;
 	globalstat.num_perstatus[abs(d->status)] -= 1;
 
+	assert(!d->deleted);
+	/* mark download as not valid; will be freed when refcnt hits zero */
+	d->deleted = true;
+
 	unref_download(d);
 }
 
@@ -336,7 +345,7 @@ static void
 clear_downloads(void)
 {
 	while (num_downloads > 0)
-		forget_download_at(&downloads[num_downloads - 1]);
+		delete_download_at(&downloads[num_downloads - 1]);
 }
 
 static void
@@ -393,21 +402,25 @@ new_download(void)
 	return dd;
 }
 
-static struct aria_download **
-find_download(struct aria_download const *d)
+/* return whether |d| is still valid (on the list); |pdd| will be filled with
+ * location of |d| if not NULL */
+static bool
+upgrade_download(struct aria_download const *d, struct aria_download ***pdd)
 {
-	struct aria_download **dd = downloads;
-	struct aria_download **const end = &downloads[num_downloads];
+	if (NULL != pdd) {
+		struct aria_download **dd = downloads;
 
-	for (; dd < end; ++dd)
-		if (d == *dd)
-			return dd;
+		for (; *dd != d; ++dd)
+			;
 
-	return NULL;
+		*pdd = dd;
+	}
+
+	return !d->deleted;
 }
 
 static bool
-filter_download(struct aria_download **dd);
+filter_download(struct aria_download *d, struct aria_download **dd);
 
 static struct aria_download **
 get_download_bygid(char const *gid, bool create)
@@ -430,7 +443,7 @@ get_download_bygid(char const *gid, bool create)
 	memcpy(d->gid, gid, sizeof d->gid);
 
 	/* try applying selectors as soon as possible */
-	return filter_download(dd) ? dd : NULL;
+	return filter_download(d, dd) ? dd : NULL;
 }
 
 static void
@@ -489,12 +502,14 @@ static void
 on_downloads_change(int stickycurs);
 
 static void
-on_download_status_change(struct aria_download *d)
-{
-	(void)d;
+update(void);
 
-	on_downloads_change(1);
-	refresh();
+static bool
+download_insufficient(struct aria_download *d)
+{
+	return d->display_name == NONAME ||
+		(-DOWNLOAD_ERROR == d->status && NULL == d->error_message) ||
+		(is_local && 0 == d->num_files);
 }
 
 static void
@@ -525,7 +540,13 @@ on_notification(char const *method, struct json_node *event)
 		globalstat.num_perstatus[abs(d->status)] -= 1;
 		d->status = -newstatus;
 		globalstat.num_perstatus[newstatus] += 1;
-		on_download_status_change(d);
+
+		on_downloads_change(1);
+		refresh();
+
+		/* in a perfect world we should update only this one download */
+		if (download_insufficient(d))
+			update();
 	}
 }
 
@@ -1116,10 +1137,9 @@ isgid(char const *str)
 /* remove download if none of the selectors matches. return whether |dd| is
  * still valid (not removed). */
 static bool
-filter_download(struct aria_download **dd)
+filter_download(struct aria_download *d, struct aria_download **dd)
 {
 	size_t i;
-	struct aria_download const *d = *dd;
 
 	/* no --selects means all downloads */
 	if (0 == action.num_sel)
@@ -1137,13 +1157,8 @@ filter_download(struct aria_download **dd)
 			size_t j;
 			size_t const sellen = strlen(sel);
 
-			/* still waiting for files; cannot decide */
-			if (0 == d->num_files)
-				continue;
-
-			/* requested files but could not allocate memory; treat
-			 * as matching */
-			if (NULL == d->files)
+			/* missing data can be anything */
+			if (0 == d->num_files || NULL == d->files)
 				return true;
 
 			for (j = 0; j < d->num_files; ++j) {
@@ -1155,15 +1170,17 @@ filter_download(struct aria_download **dd)
 	}
 
 	/* no selectors matched */
-	forget_download_at(dd);
+	if (NULL == dd)
+		(void)upgrade_download(d, &dd);
+	delete_download_at(dd);
 	return false;
 }
 
 static void
-download_changed(struct aria_download **dd)
+download_changed(struct aria_download *d, struct aria_download **dd)
 {
-	update_display_name(*dd);
-	filter_download(dd);
+	update_display_name(d);
+	filter_download(d, dd);
 }
 
 static void
@@ -1314,14 +1331,6 @@ parse_global_stat(struct json_node *node)
 	} while (NULL != (node = json_next(node)));
 }
 
-static bool
-download_insufficient(struct aria_download *d)
-{
-	return d->display_name == NONAME ||
-		(-DOWNLOAD_ERROR == d->status && NULL == d->error_message) ||
-		(is_local && 0 == d->num_files);
-}
-
 static void
 parse_option(char const *option, char const *value, struct aria_download *d)
 {
@@ -1368,35 +1377,34 @@ parse_option(char const *option, char const *value, struct aria_download *d)
 static void
 try_connect(void)
 {
+	if (try_connect != periodic) {
+		periodic = try_connect;
+		period.tv_sec = 1;
+		period.tv_nsec = 0;
+	} else {
+		period.tv_sec *= 2;
+	}
+
 	ws_connect(remote_host, remote_port);
 }
 
-static void
-update_delta(int all);
-
-struct periodic_arg {
-	unsigned has_get_peers: 1;
-	unsigned has_get_servers: 1;
-	unsigned has_get_options: 1;
+struct update_arg {
+	struct aria_download *download;
+	bool has_get_peers: 1;
+	bool has_get_servers: 1;
+	bool has_get_options: 1;
 };
 
 static void
-parse_downloads(struct json_node *result, struct periodic_arg *arg)
+parse_downloads(struct json_node *result, struct update_arg *arg)
 {
-	int some_insufficient = 0;
+	bool some_insufficient = false;
 
 	for (; NULL != result; result = json_next(result), ++arg) {
 		struct json_node *node;
-		struct aria_download **dd;
-		struct aria_download *d;
+		struct aria_download *d = arg->download;
 
-		if (json_obj == json_type(result)) {
-			error_handler(result);
-			goto skip;
-		}
-
-		node = json_children(result);
-		if (NULL == (dd = get_download_bygid(json_get(node, "gid")->val.str, 1))) {
+		if (!upgrade_download(d, NULL)) {
 		skip:
 			if (arg->has_get_peers || arg->has_get_servers)
 				result = json_next(result);
@@ -1404,7 +1412,16 @@ parse_downloads(struct json_node *result, struct periodic_arg *arg)
 				result = json_next(result);
 			continue;
 		}
-		d = *dd;
+
+		if (json_obj == json_type(result)) {
+			struct aria_download **dd;
+
+			upgrade_download(d, &dd);
+			delete_download_at(dd);
+			goto skip;
+		}
+
+		node = json_children(result);
 
 		/* these fields are not included in response if not
 		 * applicable, so we do a self reference loop to
@@ -1439,15 +1456,24 @@ parse_downloads(struct json_node *result, struct periodic_arg *arg)
 
 		some_insufficient |= download_insufficient(d);
 
-		download_changed(dd);
+		download_changed(d, NULL);
 	}
 
 	if (some_insufficient)
-		update_delta(1);
+		update();
 }
 
 static void
-on_periodic(struct json_node *result, struct periodic_arg *arg)
+set_periodic_update(void)
+{
+	bool const any_activity = 0 < globalstat.download_speed || 0 < globalstat.upload_speed;
+	periodic = update;
+	period.tv_sec = any_activity ? 1 : 3;
+	period.tv_nsec = 271 * 1000000;
+}
+
+static void
+on_update(struct json_node *result, struct update_arg *arg)
 {
 	if (NULL == result)
 		goto free_arg;
@@ -1464,6 +1490,7 @@ on_periodic(struct json_node *result, struct periodic_arg *arg)
 	}
 
 	refresh();
+	set_periodic_update();
 
 free_arg:
 	free(arg);
@@ -1476,19 +1503,16 @@ getmainheight(void)
 }
 
 static void
-update_delta(int all)
+update(void)
 {
 	struct rpc_request *req;
-
-	if (!ws_isalive()) {
-		try_connect();
-		return;
-	}
 
 	if (NULL == (req = new_rpc()))
 		return;
 
-	req->handler = (rpc_handler)on_periodic;
+	periodic = NULL;
+
+	req->handler = (rpc_handler)on_update;
 
 	json_write_key(jw, "method");
 	json_write_str(jw, "system.multicall");
@@ -1512,8 +1536,8 @@ update_delta(int all)
 	if (num_downloads > 0) {
 		struct aria_download **dd;
 		int i, n;
-		struct periodic_arg *arg;
-		if (all && view == VIEWS[1]) {
+		struct update_arg *arg;
+		if (view == VIEWS[1]) {
 			dd = &downloads[topidx];
 			n = getmainheight();
 
@@ -1544,8 +1568,6 @@ update_delta(int all)
 			json_write_str(jw, d->gid);
 			/* “keys” */
 			json_write_beginarr(jw);
-
-			json_write_str(jw, "gid");
 
 			if (DOWNLOAD_REMOVED != abs(d->status))
 				json_write_str(jw, "status");
@@ -1612,6 +1634,8 @@ update_delta(int all)
 			json_write_endarr(jw);
 			json_write_endobj(jw);
 
+			arg->download = ref_download(d);
+
 			arg->has_get_peers = 0;
 			arg->has_get_servers = 0;
 			if ((DOWNLOAD_ACTIVE == abs(d->status) || d->status < 0) && (NULL != d->name
@@ -1645,6 +1669,8 @@ update_delta(int all)
 			}
 
 		}
+	} else {
+		req->arg = NULL;
 	}
 
 	json_write_endarr(jw); /* }}} */
@@ -1780,8 +1806,8 @@ on_remove_result(struct json_node *result, struct aria_download *d)
 		struct aria_download **dd;
 
 		if (NULL != d) {
-			if (NULL != (dd = find_download(d)))
-				forget_download_at(dd);
+			if (upgrade_download(d, &dd))
+				delete_download_at(dd);
 		} else {
 			struct aria_download **end = &downloads[num_downloads];
 			for (dd = downloads; dd < end;) {
@@ -1789,7 +1815,7 @@ on_remove_result(struct json_node *result, struct aria_download *d)
 				case DOWNLOAD_COMPLETE:
 				case DOWNLOAD_ERROR:
 				case DOWNLOAD_REMOVED:
-					forget_download_at(dd);
+					delete_download_at(dd);
 					--end;
 					break;
 
@@ -2009,9 +2035,11 @@ static void
 on_download_getfiles(struct json_node *result, struct aria_download *d)
 {
 	if (NULL != result) {
-		parse_download_files(d, result);
-		draw_main();
-		refresh();
+		if (upgrade_download(d, NULL)) {
+			parse_download_files(d, result);
+			draw_main();
+			refresh();
+		}
 	}
 
 	unref_download(d);
@@ -2466,7 +2494,7 @@ draw_cursor(void)
 	} else if (oldselidx != selidx) {
 		on_scroll_changed();
 		/* update now seen downloads */
-		update_delta(1);
+		update();
 	}
 
 	if (oldselidx != selidx) {
@@ -2641,8 +2669,7 @@ foreach_download(void(*cb)(struct aria_download const *))
 static void
 on_update_all(struct json_node *result, void *arg)
 {
-	int some_insufficient = 0;
-	size_t i;
+	bool some_insufficient = false;
 
 	(void)arg;
 
@@ -2690,16 +2717,10 @@ on_update_all(struct json_node *result, void *arg)
 
 			some_insufficient |= download_insufficient(d);
 
-			download_changed(dd);
+			download_changed(d, dd);
 		} while (NULL != (node = json_next(node)));
 
 	} while (NULL != (result = json_next(result)));
-
-	/* now create fake downloads with selected GIDs so user will be
-	 * notified if does not exist */
-	for (i = 0; i < action.num_sel; ++i)
-		if (isgid(action.sel[i]))
-			get_download_bygid(action.sel[i], 1);
 
 	switch (action.kind) {
 	case act_visual:
@@ -2731,7 +2752,9 @@ on_update_all(struct json_node *result, void *arg)
 		refresh();
 
 		if (some_insufficient)
-			update_delta(1);
+			update();
+		else
+			set_periodic_update();
 	}
 }
 
@@ -2876,7 +2899,9 @@ on_options(struct json_node *result, struct aria_download *d)
 {
 	if (NULL != result) {
 		clear_error_message();
-		parse_options(result, (parse_options_cb)parse_option, d);
+
+		if (NULL == d || upgrade_download(d, NULL))
+			parse_options(result, (parse_options_cb)parse_option, d);
 	}
 
 	if (NULL != d)
@@ -2905,6 +2930,9 @@ on_show_options(struct json_node *result, struct aria_download *d)
 		goto out;
 
 	clear_error_message();
+
+	if (NULL != d && !upgrade_download(d, NULL))
+		goto out;
 
 	if (NULL == (f = fopen(session_file, "w")))
 		goto out;
@@ -3006,7 +3034,6 @@ update_options(struct aria_download *d, int user)
 	json_write_endarr(jw);
 
 	do_rpc();
-	/* update_delta(NULL != d ? 0 : 1); */
 }
 
 static void
@@ -3352,9 +3379,8 @@ on_download_remove(struct json_node *result, struct aria_download *d)
 	if (NULL != result) {
 		struct aria_download **dd;
 
-		/* download removed */
-		if (NULL != (dd = find_download(d))) {
-			forget_download_at(dd);
+		if (upgrade_download(d, &dd)) {
+			delete_download_at(dd);
 
 			on_downloads_change(1);
 			refresh();
@@ -3407,7 +3433,7 @@ switch_view(int next)
 		oldselidx = -1; /* force redraw */
 	}
 
-	update_delta(1);
+	update();
 	draw_all();
 	refresh();
 }
@@ -3738,6 +3764,7 @@ void
 on_ws_open(void)
 {
 	setasync(ws_fileno());
+	periodic = NULL;
 
 	clear_error_message();
 
@@ -3756,9 +3783,9 @@ on_ws_close(void)
 	if (act_visual != action.kind)
 		exit(EXIT_FAILURE);
 
-	clear_rpc_requests();
+	periodic = NULL;
 
-	memset(&rpc_requests, 0, sizeof rpc_requests);
+	clear_rpc_requests();
 
 	clear_downloads();
 	free(downloads), downloads = NULL;
@@ -3871,21 +3898,13 @@ main(int argc, char *argv[])
 		siginfo_t si;
 		int signum;
 
-		if (act_visual == action.kind) {
-			struct timespec to;
-			int const any_activity = globalstat.download_speed + globalstat.upload_speed > 0;
-
-			to.tv_sec = any_activity ? 1 : 2;
-			to.tv_nsec = (any_activity ? 314 : 718) * 1000000;
-
-			signum = sigtimedwait(&ss, &si, &to);
-		} else {
-			signum = sigwaitinfo(&ss, &si);
-		}
+		signum = NULL != periodic
+			? sigtimedwait(&ss, &si, &period)
+			: sigwaitinfo(&ss, &si);
 
 		switch (signum) {
 		case -1:
-			update_delta(1);
+			periodic();
 			break;
 
 		case SIGIO:
