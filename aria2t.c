@@ -3734,7 +3734,7 @@ remote_info(void)
 static void
 setasync(int fd)
 {
-	fcntl(fd, F_SETFL, O_ASYNC | O_NONBLOCK | fcntl(fd, F_GETFL));
+	fcntl(fd, F_SETFL, O_ASYNC | fcntl(fd, F_GETFL));
 	fcntl(fd, F_SETOWN, getpid());
 	fcntl(fd, F_SETSIG, SIGIO);
 }
@@ -3742,7 +3742,6 @@ setasync(int fd)
 void
 on_ws_open(void)
 {
-	assert("eou");
 	setasync(ws_fileno());
 
 	clear_error_message();

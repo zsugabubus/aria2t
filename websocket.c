@@ -1,19 +1,17 @@
 /* A minimal WebSocket implementation. */
-#include <stdlib.h>
-#include <openssl/sha.h>
-#include <openssl/rand.h>
-#include <sys/socket.h>
-#include <string.h>
-#include <stdint.h>
-#include <endian.h>
 #include <assert.h>
-#include <stdio.h>
+#include <endian.h>
 #include <errno.h>
-#include <unistd.h>
 #include <fcntl.h>
-#include <sys/types.h>
 #include <netdb.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/types.h>
 #include <sys/uio.h>
+#include <unistd.h>
 
 #include "program.h"
 #include "websocket.h"
@@ -21,7 +19,7 @@
 #define container_of(ptr, type, member) (type *)((char *)ptr - offsetof(type, member))
 #define array_len(arr) (sizeof(arr) / sizeof *(arr))
 
-static int ws = -1;
+static int ws[2] = {-1, -1};
 
 #define BUFPAD 6
 static uint64_t buflen;
@@ -32,13 +30,21 @@ static char *_buf;
 int
 ws_fileno(void)
 {
-	return ws;
+	return ws[0];
 }
 
 int
 ws_isalive(void)
 {
-	return 0 <= ws;
+	return 0 <= ws[0];
+}
+
+static void
+ws_close(void)
+{
+	on_ws_close();
+	close(ws[0]), ws[0] = -1;
+	close(ws[1]);
 }
 
 static int
@@ -47,7 +53,7 @@ expect_http_upgrade(void)
 	for (;;) {
 		ssize_t res;
 
-		if (0 <= (res = read(ws, buf, bufsiz - buflen - 1/*nil*/))) {
+		if (0 <= (res = read(ws[0], buf, bufsiz - buflen - 1/*nil*/))) {
 			char *end;
 
 			buflen += (size_t)res;
@@ -84,7 +90,7 @@ http_upgrade(char const *host, in_port_t port)
 "\r\n",
 		host, port);
 
-	if (write(ws, buf, len) < 0)
+	if (write(ws[1], buf, len) < 0)
 		return -1;
 
 	return expect_http_upgrade();
@@ -98,7 +104,7 @@ ws_connect(char const *host, in_port_t port)
 	int ret;
 	char portstr[sizeof "65536"];
 
-	assert("not connected" && 0 > ws);
+	assert("not connected" && !ws_isalive());
 
 	memset(&hints, 0, sizeof hints);
 	hints.ai_family = AF_UNSPEC;
@@ -117,60 +123,64 @@ ws_connect(char const *host, in_port_t port)
 		return;
 	}
 
-	ws = -1;
 	for (p = addrs; NULL != p; p = p->ai_next) {
-		ws = socket(p->ai_family,
+		ws[0] = socket(p->ai_family,
 				p->ai_socktype
 #ifdef SOCK_CLOEXEC
-				| SOCK_CLOEXEC,
+				| SOCK_CLOEXEC
 #endif
-				p->ai_protocol);
-		if (-1 == ws)
+				, p->ai_protocol);
+		if (-1 == ws[0])
 			continue;
 
-#ifndef SOCK_CLOEXEC
-		{
-			int flags = fcntl(ws, F_GETFD);
-			flags |= O_CLOEXEC;
-			(void)fcntl(ws, F_SETFD, flags);
-		}
-#endif
-
-		if (0 == connect(ws, p->ai_addr, p->ai_addrlen))
+		if (0 == connect(ws[0], p->ai_addr, p->ai_addrlen))
 			break;
 
-		close(ws);
+		close(ws[0]), ws[0] = -1;
 	}
 
 	freeaddrinfo(addrs);
 
+	if (ws[0] < 0) {
+		free(error_message), error_message = strdup(strerror(errno));
+		return;
+	}
+
 	buflen = 0;
 	_buf = realloc(_buf, BUFPAD + (bufsiz = BUFSIZ));
 
-	if (ws < 0) {
-		free(error_message), error_message = strdup(strerror(errno));
-	} else if (http_upgrade(host, port)) {
-		close(ws), ws = -1;
+	/* make read non-blocking but write blocking; duplicate fds so we do
+	 * not have to flip O_NONBLOCK on and off before every operation */
+	ws[1] = fcntl(ws[0], F_DUPFD_CLOEXEC, 0);
+	fcntl(ws[0], F_SETFL, O_NONBLOCK | fcntl(ws[0], F_GETFL));
+#ifndef SOCK_CLOEXEC
+	fcntl(ws[0], F_SETFD, O_CLOEXEC | fcntl(ws[0], F_GETFD));
+#endif
+
+	if (http_upgrade(host, port)) {
+		close(ws[0]), ws[0] = -1;
+		close(ws[1]);
 		free(error_message), error_message = strdup("connection refused");
-	} else {
-		on_ws_open();
+		return;
 	}
+
+	on_ws_open();
 }
 
 void
 ws_write(char const *msg, size_t msglen)
 {
 	struct iovec iov[2];
-	unsigned char hdr[6 + 2 + 8 + 4] __attribute__((aligned(8)));
-	unsigned char *p = hdr + 6;
+	uint8_t hdr[6 + 2 + 8 + 4] __attribute__((aligned(8)));
+	uint8_t *p = hdr + 6;
 
 	iov[0].iov_base = p;
 	iov[1].iov_base = (char *)msg;
 	iov[1].iov_len = msglen;
 
 	/* header */
-	p[0] = 0x81U/*fin+text*/;
-	p[1] = 0x80U/*mask*/;
+	p[0] = UINT8_C(0x81)/*fin+text*/;
+	p[1] = UINT8_C(0x80)/*mask*/;
 	/* payload length */
 	if (msglen < 126) {
 		p[1] |= msglen;
@@ -190,11 +200,10 @@ ws_write(char const *msg, size_t msglen)
 
 	iov[0].iov_len = p - (hdr + 6);
 
-	while (-1 == writev(ws, iov, array_len(iov))) {
+	while (-1 == writev(ws[1], iov, array_len(iov))) {
 		if (EINTR == errno)
 			continue;
-		on_ws_close();
-		close(ws), ws = -1;
+		ws_close();
 		return;
 	}
 }
@@ -211,10 +220,10 @@ ws_process_frames(void)
 			return;
 
 		/* server->client must not mask */
-		switch (buf[1]) {
+		switch ((uint8_t)buf[1]) {
 		default:
 			hdrlen = 2;
-			payloadlen = buf[1];
+			payloadlen = (uint8_t)buf[1];
 			break;
 
 		case 126:
@@ -233,9 +242,9 @@ ws_process_frames(void)
 		framelen = hdrlen + payloadlen;
 		/* do we have the whole frame in buffer? */
 		if (framelen <= buflen) {
-			switch ((unsigned char)buf[0]) {
-			case 0x81U: /* fin := 1, rsv{1,2,3} := 0, text frame */
-				on_ws_message(buf + hdrlen, payloadlen);
+			switch ((uint8_t)buf[0]) {
+			case UINT8_C(0x81): /* fin := 1, rsv{1,2,3} := 0, text frame == 1 */
+				on_ws_message((char *)buf + hdrlen, payloadlen);
 				buflen -= framelen;
 				memmove(buf, buf + framelen, buflen);
 				break;
@@ -262,16 +271,17 @@ ws_process_frames(void)
 void
 ws_read(void)
 {
-	ssize_t res;
+	for (;;) {
+		ssize_t res;
 
-again:
-	if (0 < (res = read(ws, buf + buflen, bufsiz - buflen))) {
-		buflen += (size_t)res;
-		ws_process_frames();
-	} else if (EINTR == errno) {
-		goto again;
-	} else {
-		on_ws_close();
-		close(ws), ws = -1;
+		if (0 < (res = read(ws[0], buf + buflen, bufsiz - buflen))) {
+			buflen += (size_t)res;
+			ws_process_frames();
+		} else if (EAGAIN == errno) {
+			return;
+		} else {
+			ws_close();
+			return;
+		}
 	}
 }
