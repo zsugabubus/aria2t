@@ -314,13 +314,29 @@ unref_download(struct aria_download *d)
 }
 
 static void
+forget_download_at(struct aria_download **dd)
+{
+	struct aria_download *d = *dd;
+
+	*dd = downloads[--num_downloads];
+
+	if (longest_tag == d) {
+		tag_col_width = 0;
+		longest_tag = NULL;
+	}
+
+	globalstat.have_total -= d->have;
+	globalstat.uploaded_total -= d->uploaded;
+	globalstat.num_perstatus[abs(d->status)] -= 1;
+
+	unref_download(d);
+}
+
+static void
 clear_downloads(void)
 {
-	globalstat.have_total = 0;
-	globalstat.uploaded_total = 0;
-
 	while (num_downloads > 0)
-		unref_download(downloads[--num_downloads]);
+		forget_download_at(&downloads[num_downloads - 1]);
 }
 
 static void
@@ -1095,25 +1111,6 @@ isgid(char const *str)
 	}
 
 	return '\0' == str[16];
-}
-
-static void
-forget_download_at(struct aria_download **dd)
-{
-	struct aria_download *d = *dd;
-
-	*dd = downloads[--num_downloads];
-
-	if (longest_tag == d) {
-		tag_col_width = 0;
-		longest_tag = NULL;
-	}
-
-	globalstat.have_total -= d->have;
-	globalstat.uploaded_total -= d->uploaded;
-	globalstat.num_perstatus[abs(d->status)] -= 1;
-
-	unref_download(d);
 }
 
 /* remove download if none of the selectors matches. return whether |dd| is
