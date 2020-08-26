@@ -57,7 +57,7 @@ static struct {
 		act_pause,
 		act_unpause,
 		act_purge
-	} typ;
+	} kind;
 	bool uses_files;
 	size_t num_sel;
 	char **sel;
@@ -97,8 +97,8 @@ struct aria_peer {
 	char ip[INET6_ADDRSTRLEN];
 	in_port_t port;
 
-	unsigned up_choked: 1;
-	unsigned down_choked: 1;
+	bool up_choked: 1;
+	bool down_choked: 1;
 
 	uint32_t pieces_have;
 	struct timespec latest_change; /* latest time when pieces_have changed */
@@ -116,8 +116,7 @@ struct aria_server {
 };
 enum aria_uri_status {
 	aria_uri_status_waiting,
-	aria_uri_status_used,
-	aria_uri_status_count
+	aria_uri_status_used
 };
 
 struct aria_uri {
@@ -455,7 +454,7 @@ error_handler(struct json_node *error)
 {
 	struct json_node const *message = json_get(error, "message");
 
-	if (act_visual == action.typ) {
+	if (act_visual == action.kind) {
 		set_error_message("%s", message->val.str);
 		refresh();
 	} else {
@@ -1724,7 +1723,7 @@ aria_pause(struct aria_download *d, bool pause, bool force)
 	if (NULL == req)
 		return;
 
-	if (act_visual != action.typ)
+	if (act_visual != action.kind)
 		req->handler = action_exit;
 
 	if (0 == action.num_sel || NULL != d) {
@@ -2705,7 +2704,7 @@ on_update_all(struct json_node *result, void *arg)
 		if (isgid(action.sel[i]))
 			get_download_bygid(action.sel[i], 1);
 
-	switch (action.typ) {
+	switch (action.kind) {
 	case act_visual:
 		/* no-op */
 		break;
@@ -2722,7 +2721,7 @@ on_update_all(struct json_node *result, void *arg)
 
 	case act_pause:
 	case act_unpause:
-		aria_pause(NULL, act_pause == action.typ, do_forced);
+		aria_pause(NULL, act_pause == action.kind, do_forced);
 		break;
 
 	case act_purge:
@@ -2730,7 +2729,7 @@ on_update_all(struct json_node *result, void *arg)
 		break;
 	}
 
-	if (act_visual == action.typ) {
+	if (act_visual == action.kind) {
 		on_downloads_change(0);
 		refresh();
 
@@ -3023,7 +3022,6 @@ show_options(struct aria_download *d)
 static void
 on_downloads_add(struct json_node *result, void *arg)
 {
-	size_t n;
 	bool ok = true;
 
 	(void)arg;
@@ -3031,7 +3029,6 @@ on_downloads_add(struct json_node *result, void *arg)
 	if (json_isempty(result))
 		return;
 
-	n = 0;
 	result = json_children(result);
 	do {
 		struct aria_download **dd;
@@ -3052,14 +3049,22 @@ on_downloads_add(struct json_node *result, void *arg)
 					selidx = dd - downloads;
 			}
 		}
-		++n;
 	} while (NULL != (result = json_next(result)));
 
-	if (act_add_downloads == action.typ)
+	switch (action.kind) {
+	case act_add_downloads:
 		exit(ok ? EXIT_SUCCESS : EXIT_FAILURE);
+		break;
 
-	on_downloads_change(1);
-	refresh();
+	case act_visual:
+		on_downloads_change(1);
+		refresh();
+		break;
+
+	default:
+		/* no-op */
+		break;
+	}
 }
 
 static void
@@ -3316,7 +3321,7 @@ update_all(void)
 		json_write_str(jw, "gid");
 		json_write_str(jw, "status");
 		json_write_str(jw, "errorMessage");
-		if (act_visual == action.typ) {
+		if (act_visual == action.kind) {
 			json_write_str(jw, "totalLength");
 			json_write_str(jw, "completedLength");
 			json_write_str(jw, "uploadLength");
@@ -3328,7 +3333,7 @@ update_all(void)
 			json_write_str(jw, "numPieces");
 			json_write_str(jw, "pieceLength");
 		}
-		if (act_visual == action.typ ? is_local : action.uses_files)
+		if (act_visual == action.kind ? is_local : action.uses_files)
 			json_write_str(jw, "files");
 		json_write_endarr(jw);
 		/* }}} */
@@ -3583,7 +3588,7 @@ stdin_read(void)
 			/* try connect if not connected */
 			if (!ws_isalive())
 				try_connect();
-			action.typ = act_visual;
+			action.kind = act_visual;
 			action.num_sel = 0;
 			update_all();
 			break;
@@ -3671,13 +3676,19 @@ on_remote_info(struct json_node *result, void *arg)
 
 	/* we have is_local correctly set, so we can start requesting downloads */
 
-	if (act_add_downloads == action.typ)
+	switch (action.kind) {
+	case act_add_downloads:
 		add_downloads('\0');
-	else if (act_shutdown == action.typ)
-		aria_shutdown(do_forced);
-	else
-		update_all();
+		break;
 
+	case act_shutdown:
+		aria_shutdown(do_forced);
+		break;
+
+	default:
+		update_all();
+		break;
+	}
 }
 
 static void
@@ -3751,7 +3762,7 @@ on_ws_close(void)
 	if (0 == errno)
 		exit(EXIT_SUCCESS);
 
-	if (act_visual != action.typ)
+	if (act_visual != action.kind)
 		exit(EXIT_FAILURE);
 
 	clear_rpc_requests();
@@ -3796,17 +3807,17 @@ main(int argc, char *argv[])
 			while (++argi, NULL != argv[argi] && '-' != *argv[argi])
 				++action.num_sel;
 		} else if (0 == strcmp(arg, "--print-gid")) {
-			action.typ = act_print_gid;
+			action.kind = act_print_gid;
 		} else if (0 == strcmp(arg, "--add")) {
-			action.typ = act_add_downloads;
+			action.kind = act_add_downloads;
 		} else if (0 == strcmp(arg, "--shutdown")) {
-			action.typ = act_shutdown;
+			action.kind = act_shutdown;
 		} else if (0 == strcmp(arg, "--pause")) {
-			action.typ = act_pause;
+			action.kind = act_pause;
 		} else if (0 == strcmp(arg, "--unpause")) {
-			action.typ = act_unpause;
+			action.kind = act_unpause;
 		} else if (0 == strcmp(arg, "--purge")) {
-			action.typ = act_purge;
+			action.kind = act_purge;
 		} else if (0 == strcmp(arg, "--force")) {
 			do_forced = 1;
 		} else {
@@ -3836,7 +3847,7 @@ main(int argc, char *argv[])
 
 	sigprocmask(SIG_BLOCK, &ss, NULL);
 
-	if (act_visual == action.typ) {
+	if (act_visual == action.kind) {
 		setasync(STDIN_FILENO);
 
 		atexit(_endwin);
@@ -3869,7 +3880,7 @@ main(int argc, char *argv[])
 		siginfo_t si;
 		int signum;
 
-		if (act_visual == action.typ) {
+		if (act_visual == action.kind) {
 			struct timespec to;
 			int const any_activity = globalstat.download_speed + globalstat.upload_speed > 0;
 
@@ -3887,11 +3898,10 @@ main(int argc, char *argv[])
 			break;
 
 		case SIGIO:
-			if (STDIN_FILENO == si.si_fd) {
+			if (STDIN_FILENO == si.si_fd)
 				stdin_read();
-			} else {
+			else
 				ws_read();
-			}
 			break;
 
 		case SIGWINCH:
