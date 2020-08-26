@@ -3392,10 +3392,10 @@ static void
 remove_download(struct aria_download *d, bool force)
 {
 	if (run_action(d, "D") < 0) {
-		if (DOWNLOAD_ACTIVE != abs(d->status))
-			aria_download_remove(d, force);
-		else
+		if (DOWNLOAD_ACTIVE == abs(d->status))
 			set_error_message("refusing to delete active download");
+		else
+			aria_download_remove(d, force);
 	}
 }
 
@@ -3525,12 +3525,7 @@ stdin_read(void)
 		case 'D':
 		case KEY_DC: /*delete*/
 			if (num_downloads > 0) {
-				struct aria_download *d = downloads[selidx];
-
-				if (DOWNLOAD_ACTIVE != abs(d->status))
-					remove_download(d, do_forced);
-				else
-					set_error_message("refusing to delete active download");
+				remove_download(downloads[selidx], do_forced);
 				do_forced = 0;
 			}
 			break;
