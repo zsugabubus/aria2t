@@ -34,8 +34,7 @@ do
 %define hash-function-name ${name}_hash_
 %define lookup-function-name ${name}_lookup_
 %{
-enum ${name}_e_
-{
+enum ${name}_e_ {
 	${name}_none
 $(printf '%s' "$table" | sed 's/.*\t\(.*\)/\t, \1/')
 };

@@ -28,7 +28,6 @@
 #include "keys.in"
 
 /*
- * TODO: following downloads
  * TODO: naming_convention
  * */
 
@@ -50,6 +49,8 @@ static struct timespec period;
 static void(*periodic)(void);
 
 static bool is_local; /* server runs on local host */
+
+#define addspaces(n) addnstr("                                          "/*31+5+6=42*/, n);
 
 static struct {
 	enum {
@@ -144,10 +145,10 @@ struct aria_download {
 	char *tags;
 	char gid[16 + 1];
 
-	uint8_t deleted: 1; /* strong refs (is on list or not) */
 	uint8_t refcnt; /* weak refs */
-
-	bool requested_bittorrent: 1;
+	bool deleted: 1; /* one strong ref: is on the list or not */
+	bool initialized: 1;
+	bool requested_options: 1;
 	/* DOWNLOAD_*; or negative if changed. */
 	int8_t status;
 	uint16_t queue_index;
@@ -163,6 +164,8 @@ struct aria_download {
 	uint32_t num_pieces;
 	uint32_t piece_size;
 
+	uint32_t seed_ratio;
+
 	uint64_t total;
 	uint64_t have;
 	uint64_t uploaded;
@@ -175,25 +178,36 @@ struct aria_download {
 
 	char *dir;
 
+	bool follows; /* follows or belongsTo |parent| */
 	struct aria_peer *peers;
 	struct aria_file *files;
-	struct aria_download *belongs_to;
-	struct aria_download *following;
+
+	struct aria_download *parent;
+	struct aria_download *first_child;
+	struct aria_download *next_sibling;
 };
 
-struct aria_globalstat {
+struct aria_global {
 	uint64_t download_speed;
 	uint64_t upload_speed;
+	uint64_t download_speed_total;
+	uint64_t upload_speed_total;
+
 	uint64_t download_speed_limit;
 	uint64_t upload_speed_limit;
 
 	uint64_t uploaded_total;
 	uint64_t have_total;
 
+	/* number of downloads that has download-speed-limit set */
+	uint64_t num_download_limited;
+	/* number of downloads that has upload-speed-limit or seed-ratio set */
+	uint64_t num_upload_limited;
+
 	uint32_t num_perstatus[DOWNLOAD_COUNT];
 };
 
-static struct aria_globalstat globalstat;
+static struct aria_global global;
 
 static struct aria_download **downloads;
 static size_t num_downloads;
@@ -217,7 +231,7 @@ static void draw_main(void);
 static void draw_files(void);
 static void draw_peers(void);
 static void draw_downloads(void);
-static void draw_download(struct aria_download const *d, struct aria_download const *root, int *y);
+static void draw_download(struct aria_download const *d, bool draw_parents, int *y);
 
 static void
 free_peer(struct aria_peer *p)
@@ -290,10 +304,32 @@ free_files_of(struct aria_download *d)
 }
 
 static void
+unref_download(struct aria_download *d);
+
+static struct aria_download const *
+download_prev_sibling(struct aria_download const *d)
+{
+	struct aria_download const *sibling;
+
+	/* no family at all */
+	if (NULL == d->parent)
+		return NULL;
+
+	/* first child */
+	sibling = d->parent->first_child;
+	if (d == sibling)
+		return NULL;
+
+	while (sibling->next_sibling != d)
+		sibling = sibling->next_sibling;
+
+	return sibling;
+}
+
+static void
 free_download(struct aria_download *d)
 {
 	free_files_of(d);
-
 	free_peers(d->peers, d->num_peers);
 
 	free(d->dir);
@@ -306,22 +342,28 @@ free_download(struct aria_download *d)
 static struct aria_download *
 ref_download(struct aria_download *d)
 {
-	++d->refcnt;
+	if (NULL != d)
+		++d->refcnt;
 	return d;
 }
 
 static void
 unref_download(struct aria_download *d)
 {
-	assert(d->refcnt >= 1);
-	if (0 == --d->refcnt)
-		free_download(d);
+	if (NULL != d) {
+		assert(d->refcnt >= 1);
+		if (0 == --d->refcnt)
+			free_download(d);
+	}
 }
 
 static void
 delete_download_at(struct aria_download **dd)
 {
 	struct aria_download *d = *dd;
+	struct aria_download *sibling, *next;
+
+	assert(!d->deleted);
 
 	*dd = downloads[--num_downloads];
 
@@ -330,11 +372,34 @@ delete_download_at(struct aria_download **dd)
 		longest_tag = NULL;
 	}
 
-	globalstat.have_total -= d->have;
-	globalstat.uploaded_total -= d->uploaded;
-	globalstat.num_perstatus[abs(d->status)] -= 1;
+	for (sibling = d->first_child;
+	     NULL != sibling;
+	     sibling = next) {
+		next = sibling->next_sibling;
+		sibling->parent = NULL;
+		sibling->next_sibling = NULL;
+	}
 
-	assert(!d->deleted);
+	/* remove download from family tree */
+	if (NULL != d->parent) {
+		struct aria_download *sibling = d->parent->first_child;
+		if (d == sibling) {
+			d->parent->first_child = d->next_sibling;
+		} else {
+			while (sibling->next_sibling != d)
+				sibling = sibling->next_sibling;
+			sibling->next_sibling = d->next_sibling;
+		}
+	}
+
+	global.have_total -= d->have;
+	global.uploaded_total -= d->uploaded;
+	global.download_speed_total -= d->download_speed;
+	global.upload_speed_total -= d->upload_speed;
+	global.num_download_limited -= !!d->download_speed_limit;
+	global.num_upload_limited -= d->seed_ratio || d->upload_speed_limit;
+	global.num_perstatus[abs(d->status)] -= 1;
+
 	/* mark download as not valid; will be freed when refcnt hits zero */
 	d->deleted = true;
 
@@ -344,7 +409,7 @@ delete_download_at(struct aria_download **dd)
 static void
 clear_downloads(void)
 {
-	while (num_downloads > 0)
+	while (0 < num_downloads)
 		delete_download_at(&downloads[num_downloads - 1]);
 }
 
@@ -385,7 +450,8 @@ static struct aria_download **
 new_download(void)
 {
 	void *p;
-	struct aria_download *d, **dd;
+	struct aria_download *d;
+	struct aria_download **dd;
 
 	if (NULL == (p = realloc(downloads, (num_downloads + 1) * sizeof *downloads)))
 		return NULL;
@@ -397,7 +463,7 @@ new_download(void)
 
 	d->refcnt = 1;
 	d->display_name = NONAME;
-	globalstat.num_perstatus[DOWNLOAD_UNKNOWN] += 1;
+	global.num_perstatus[DOWNLOAD_UNKNOWN] += 1;
 
 	return dd;
 }
@@ -423,17 +489,15 @@ static bool
 filter_download(struct aria_download *d, struct aria_download **dd);
 
 static struct aria_download **
-get_download_bygid(char const *gid, bool create)
+get_download_bygid(char const *gid)
 {
-	struct aria_download *d, **dd = downloads;
+	struct aria_download *d;
+	struct aria_download **dd = downloads;
 	struct aria_download **const end = &downloads[num_downloads];
 
 	for (; dd < end; ++dd)
 		if (0 == memcmp((*dd)->gid, gid, sizeof (*dd)->gid))
 			return dd;
-
-	if (!create)
-		return NULL;
 
 	if (NULL == (dd = new_download()))
 		return NULL;
@@ -530,16 +594,16 @@ on_notification(char const *method, struct json_node *event)
 		[K_notification_BtDownloadComplete] = DOWNLOAD_COMPLETE
 	};
 
-	if (NULL == (dd = get_download_bygid(gid, 1)))
+	if (NULL == (dd = get_download_bygid(gid)))
 		return;
 	d = *dd;
 
 	newstatus = STATUS_MAP[K_notification_parse(method + strlen("aria2.on"))];
 
 	if (newstatus != DOWNLOAD_UNKNOWN && newstatus != d->status) {
-		globalstat.num_perstatus[abs(d->status)] -= 1;
+		global.num_perstatus[abs(d->status)] -= 1;
 		d->status = -newstatus;
-		globalstat.num_perstatus[newstatus] += 1;
+		global.num_perstatus[newstatus] += 1;
 
 		on_downloads_change(1);
 		refresh();
@@ -635,7 +699,7 @@ clear_rpc_requests(void)
 }
 
 static void
-update_options(struct aria_download *d, int user);
+update_options(struct aria_download *d, bool user);
 
 static void
 parse_session_info(struct json_node *result)
@@ -1177,10 +1241,10 @@ filter_download(struct aria_download *d, struct aria_download **dd)
 }
 
 static void
-download_changed(struct aria_download *d, struct aria_download **dd)
+download_changed(struct aria_download *d)
 {
 	update_display_name(d);
-	filter_download(d, dd);
+	filter_download(d, NULL);
 }
 
 static void
@@ -1233,34 +1297,45 @@ parse_download(struct aria_download *d, struct json_node *node)
 			};
 			int8_t const newstatus = STATUS_MAP[K_status_parse(field->val.str)];
 			if (newstatus != d->status) {
-				globalstat.num_perstatus[abs(d->status)] -= 1;
+				global.num_perstatus[abs(d->status)] -= 1;
 				d->status = -newstatus;
-				globalstat.num_perstatus[newstatus] += 1;
+				global.num_perstatus[newstatus] += 1;
 			}
 		}
 			break;
 
 		case K_download_completedLength:
-			globalstat.have_total -= d->have;
+			global.have_total -= d->have;
 			d->have = strtoull(field->val.str, NULL, 10);
-			globalstat.have_total += d->have;
+			global.have_total += d->have;
 			break;
 
 		case K_download_uploadLength:
-			globalstat.uploaded_total -= d->uploaded;
+			global.uploaded_total -= d->uploaded;
 			d->uploaded = strtoull(field->val.str, NULL, 10);
-			globalstat.uploaded_total += d->uploaded;
+			global.uploaded_total += d->uploaded;
 			break;
 
-		case K_download_following: {
-			struct aria_download **dd = get_download_bygid(field->val.str, 0);
-			d->following = NULL != dd ? *dd : NULL;
-			break;
-		}
-
+		case K_download_following:
+			/* XXX: We assume that a download cannot follow and
+			 * belonging to a different download... */
+			d->follows = true;
+			/* FALLTHROUGH */
 		case K_download_belongsTo: {
-			struct aria_download **dd = get_download_bygid(field->val.str, 0);
-			d->belongs_to = NULL != dd ? *dd : NULL;
+			struct aria_download **dd = get_download_bygid(field->val.str);
+			if (NULL != dd) {
+				struct aria_download *p = *dd;
+
+				d->parent = p;
+				if (NULL == p->first_child) {
+					p->first_child = d;
+				} else {
+					p = p->first_child;
+					while (NULL != p->next_sibling)
+						p = p->next_sibling;
+					p->next_sibling = d;
+				}
+			}
 			break;
 		}
 
@@ -1270,11 +1345,15 @@ parse_download(struct aria_download *d, struct json_node *node)
 			break;
 
 		case K_download_downloadSpeed:
+			global.download_speed_total -= d->download_speed;
 			d->download_speed = strtoul(field->val.str, NULL, 10);
+			global.download_speed_total += d->download_speed;
 			break;
 
 		case K_download_uploadSpeed:
+			global.upload_speed_total -= d->upload_speed;
 			d->upload_speed = strtoul(field->val.str, NULL, 10);
+			global.upload_speed_total += d->upload_speed;
 			break;
 
 		case K_download_totalLength:
@@ -1309,10 +1388,9 @@ parse_options(struct json_node *node, parse_options_cb cb, void *arg)
 		return;
 
 	node = json_children(node);
-	do {
-		assert("option value must be string" && json_str == json_type(node));
+	do
 		cb(node->key, node->val.str, arg);
-	} while (NULL != (node = json_next(node)));
+	while (NULL != (node = json_next(node)));
 }
 
 static void
@@ -1325,9 +1403,9 @@ parse_global_stat(struct json_node *node)
 	node = json_children(node);
 	do {
 		if (0 == strcmp(node->key, "downloadSpeed"))
-			globalstat.download_speed = strtoull(node->val.str, NULL, 10);
+			global.download_speed = strtoull(node->val.str, NULL, 10);
 		else if (0 == strcmp(node->key, "uploadSpeed"))
-			globalstat.upload_speed = strtoull(node->val.str, NULL, 10);
+			global.upload_speed = strtoull(node->val.str, NULL, 10);
 	} while (NULL != (node = json_next(node)));
 }
 
@@ -1335,17 +1413,35 @@ static void
 parse_option(char const *option, char const *value, struct aria_download *d)
 {
 	if (NULL != d) {
+		static locale_t cloc = (locale_t)0;
+		locale_t origloc;
+
+		if ((locale_t)0 == cloc)
+			cloc = newlocale(LC_NUMERIC_MASK, "C", (locale_t)0);
+
 		switch (K_option_parse(option)) {
 		default:
 			/* ignore */
 			break;
 
 		case K_option_max__download__limit:
+			global.num_download_limited -= !!d->download_speed_limit;
 			d->download_speed_limit = atol(value);
+			global.num_download_limited += !!d->download_speed_limit;
 			break;
 
 		case K_option_max__upload__limit:
+			global.num_upload_limited -= d->seed_ratio || d->upload_speed_limit;
 			d->upload_speed_limit = atol(value);
+			global.num_upload_limited += d->seed_ratio || d->upload_speed_limit;
+			break;
+
+		case K_option_seed__ratio:
+			origloc = uselocale(cloc);
+			global.num_upload_limited -= d->seed_ratio || d->upload_speed_limit;
+			d->seed_ratio = (uint32_t)(strtof(value, NULL) * 100);
+			global.num_upload_limited += d->seed_ratio || d->upload_speed_limit;
+			uselocale(origloc);
 			break;
 
 		case K_option_dir:
@@ -1360,11 +1456,11 @@ parse_option(char const *option, char const *value, struct aria_download *d)
 			break;
 
 		case K_option_max__overall__download__limit:
-			globalstat.download_speed_limit = atol(value);
+			global.download_speed_limit = atol(value);
 			break;
 
 		case K_option_max__overall__upload__limit:
-			globalstat.upload_speed_limit = atol(value);
+			global.upload_speed_limit = atol(value);
 			break;
 
 		case K_option_dir:
@@ -1399,10 +1495,14 @@ static void
 parse_downloads(struct json_node *result, struct update_arg *arg)
 {
 	bool some_insufficient = false;
+	struct aria_download *d;
 
-	for (; NULL != result; result = json_next(result), ++arg) {
+	for (; NULL != result;
+	       result = json_next(result),
+	       unref_download(d), ++arg) {
 		struct json_node *node;
-		struct aria_download *d = arg->download;
+
+		d = arg->download;
 
 		if (!upgrade_download(d, NULL)) {
 		skip:
@@ -1422,16 +1522,6 @@ parse_downloads(struct json_node *result, struct update_arg *arg)
 		}
 
 		node = json_children(result);
-
-		/* these fields are not included in response if not
-		 * applicable, so we do a self reference loop to
-		 * indicate that we do not need to request these next
-		 * time */
-		if (NULL == d->belongs_to)
-			d->belongs_to = d;
-		if (NULL == d->following)
-			d->following = d;
-
 		parse_download(d, node);
 
 		if (arg->has_get_peers || arg->has_get_servers) {
@@ -1456,7 +1546,7 @@ parse_downloads(struct json_node *result, struct update_arg *arg)
 
 		some_insufficient |= download_insufficient(d);
 
-		download_changed(d, NULL);
+		download_changed(d);
 	}
 
 	if (some_insufficient)
@@ -1466,7 +1556,7 @@ parse_downloads(struct json_node *result, struct update_arg *arg)
 static void
 set_periodic_update(void)
 {
-	bool const any_activity = 0 < globalstat.download_speed || 0 < globalstat.upload_speed;
+	bool const any_activity = 0 < global.download_speed || 0 < global.upload_speed;
 	periodic = update;
 	period.tv_sec = any_activity ? 1 : 3;
 	period.tv_nsec = 271 * 1000000;
@@ -1520,7 +1610,7 @@ update(void)
 	/* 1st arg: “methods” */
 	json_write_beginarr(jw); /* {{{ */
 
-	/* update unconditionally */{
+	{
 		json_write_beginobj(jw);
 		json_write_key(jw, "methodName");
 		json_write_str(jw, "aria2.getGlobalStat");
@@ -1531,32 +1621,34 @@ update(void)
 		json_write_endarr(jw);
 		json_write_endobj(jw);
 	}
-	if (num_downloads > 0) {
-		struct aria_download **top, **lim;
+
+	if (0 < num_downloads) {
+		struct aria_download **top;
+		struct aria_download **bot;
+		struct aria_download **end = &downloads[num_downloads];
+		struct aria_download **dd = downloads;
 		struct update_arg *arg;
-		bool update_offscreen;
+		uint8_t topstatus, botstatus, status;
 		size_t arglen = 0;
 
 		if (view == VIEWS[1]) {
 			top = &downloads[topidx];
-			lim = top + getmainheight();
-			if (&downloads[num_downloads] < lim)
-				lim = &downloads[num_downloads];
+			bot = top + getmainheight() - 1;
+			if (end <= bot)
+				bot = end - 1;
 		} else {
 			top = &downloads[selidx];
-			lim = top + 1;
+			bot = top;
 		}
 
-		update_offscreen =
-			0 < globalstat.num_perstatus[DOWNLOAD_UNKNOWN] ||
-			((0 < globalstat.download_speed ||
-			  0 < globalstat.upload_speed) &&
-			 (DOWNLOAD_ACTIVE == abs(top[0]->status) ||
-			  DOWNLOAD_ACTIVE == abs(lim[-1]->status)));
+		topstatus = abs((*top)->status);
+		botstatus = abs((*bot)->status);
 
-		arglen = globalstat.num_perstatus[DOWNLOAD_UNKNOWN] +
-			(lim - top) +
-			(update_offscreen ? globalstat.num_perstatus[DOWNLOAD_ACTIVE] : 0);
+		arglen = 0;
+		status = topstatus;
+		do
+			arglen += global.num_perstatus[status];
+		while (++status <= botstatus);
 
 		if (NULL == (arg = malloc(arglen * sizeof *arg))) {
 			free_rpc(req);
@@ -1564,66 +1656,74 @@ update(void)
 		}
 		req->arg = arg;
 
-		if (update_offscreen) {
-			struct aria_download **dd = downloads;
+		for (; dd < end; ++dd) {
+			struct aria_download *d = *dd;
+			bool visible = top <= dd && dd <= bot;
+			uint8_t keyidx = 0;
+			char *keys[20];
 
-			for (;; ++dd) {
-				struct aria_download *d;
+			if (abs(d->status) < topstatus)
+				continue;
 
-				if (dd == top)
-					dd = lim;
-				if (dd == &downloads[num_downloads])
-					break;
+			if (botstatus < abs(d->status))
+				break;
 
-				d = *dd;
+#define WANT(key) keys[keyidx++] = key;
 
-				if (DOWNLOAD_UNKNOWN != d->status &&
-				    abs(d->status) < DOWNLOAD_ACTIVE)
-					continue;
+			if (!d->initialized) {
+				WANT("bittorrent");
+				WANT("numPieces");
+				WANT("pieceLength");
 
-				if (DOWNLOAD_ACTIVE < abs(d->status))
-					break;
+				WANT("following");
+				WANT("belongsTo");
 
-				json_write_beginobj(jw);
-				json_write_key(jw, "methodName");
-				json_write_str(jw, "aria2.tellStatus");
-				json_write_key(jw, "params");
-				json_write_beginarr(jw);
-				/* “secret” */
-				json_write_str(jw, secret_token);
-				/* “gid” */
-				json_write_str(jw, d->gid);
-				/* “keys” */
-				json_write_beginarr(jw);
-
-				switch (abs(d->status)) {
-				case DOWNLOAD_UNKNOWN:
-					json_write_str(jw, "status");
-					break;
-
-				case DOWNLOAD_ACTIVE:
-					if (d->have != d->total)
-						json_write_str(jw, "downloadSpeed");
-					json_write_str(jw, "uploadSpeed");
-					break;
-				}
-
-				json_write_endarr(jw);
-				json_write_endarr(jw);
-				json_write_endobj(jw);
-
-				arg->download = ref_download(d);
-				arg->has_get_peers = 0;
-				arg->has_get_servers = 0;
-				arg->has_get_options = 0;
-				++arg;
+				d->initialized = true;
+			} else {
+				if ((0 == d->num_files && (NULL == d->name || (visible && DOWNLOAD_ACTIVE != d->status && is_local))) ||
+				    view == 'f')
+					WANT("files");
 			}
 
-		}
+			if (d->status < 0) {
+				WANT("totalLength");
+				WANT("completedLength");
+				WANT("downloadSpeed");
+				WANT("uploadLength");
+				WANT("uploadSpeed");
 
-		/* visible downloads */
-		for (; top < lim; ++top, ++arg) {
-			struct aria_download *d = *top;
+				if (-DOWNLOAD_ERROR == d->status)
+					WANT("errorMessage");
+			} else if (DOWNLOAD_ACTIVE == d->status) {
+				if (0 < d->download_speed ||
+				    (global.download_speed != global.download_speed_total &&
+				     d->have != d->total))
+					WANT("downloadSpeed");
+
+				if (0 < d->download_speed)
+					WANT("completedLength");
+
+				if (0 < d->upload_speed ||
+				    global.upload_speed != global.upload_speed_total)
+					WANT("uploadSpeed");
+
+				if (0 < d->upload_speed)
+					WANT("uploadLength");
+
+				if (visible) {
+					if (0 == d->upload_speed && 0 == d->download_speed) {
+						WANT("verifiedLength");
+						WANT("verifyIntegrityPending");
+					}
+
+					WANT("connections");
+				}
+			}
+
+#undef WANT
+
+			if (0 == keyidx)
+				continue;
 
 			json_write_beginobj(jw);
 			json_write_key(jw, "methodName");
@@ -1637,53 +1737,8 @@ update(void)
 			/* “keys” */
 			json_write_beginarr(jw);
 
-			if (NULL == d->name && !d->requested_bittorrent && d->status < 0) {
-				json_write_str(jw, "bittorrent");
-				json_write_str(jw, "numPieces");
-				json_write_str(jw, "pieceLength");
-				d->requested_bittorrent = 1;
-			}
-
-			if ((0 == d->num_files && ((NULL == d->name && 0 <= d->status) || is_local)) ||
-			    (view == 'f' && (0 == d->num_files || (d->have != d->total && DOWNLOAD_ACTIVE == d->status) || d->status < 0)))
-				json_write_str(jw, "files");
-
-			if (d->status < 0) {
-				json_write_str(jw, "totalLength");
-				json_write_str(jw, "completedLength");
-				json_write_str(jw, "downloadSpeed");
-				json_write_str(jw, "uploadLength");
-				json_write_str(jw, "uploadSpeed");
-
-				if (-DOWNLOAD_ERROR == d->status)
-					json_write_str(jw, "errorMessage");
-			} else if (DOWNLOAD_ACTIVE == d->status) {
-				if (0 < d->download_speed ||
-				    (0 < globalstat.download_speed && d->have != d->total))
-					json_write_str(jw, "downloadSpeed");
-
-				if (0 < d->download_speed)
-					json_write_str(jw, "completedLength");
-
-				if (0 < globalstat.upload_speed)
-					json_write_str(jw, "uploadSpeed");
-
-				if (0 < d->upload_speed)
-					json_write_str(jw, "uploadLength");
-
-				if (0 == d->upload_speed && 0 == d->download_speed) {
-					json_write_str(jw, "verifiedLength");
-					json_write_str(jw, "verifyIntegrityPending");
-				}
-
-				json_write_str(jw, "connections");
-			}
-
-			if (NULL == d->belongs_to)
-				json_write_str(jw, "belongsTo");
-
-			if (NULL == d->following)
-				json_write_str(jw, "following");
+			while (0 < keyidx)
+				json_write_str(jw, keys[--keyidx]);
 
 			json_write_endarr(jw);
 
@@ -1691,9 +1746,12 @@ update(void)
 			json_write_endobj(jw);
 
 			arg->download = ref_download(d);
+
 			arg->has_get_peers = 0;
 			arg->has_get_servers = 0;
-			if ((DOWNLOAD_ACTIVE == abs(d->status) || d->status < 0) && (NULL != d->name
+			if (visible &&
+			    (DOWNLOAD_ACTIVE == abs(d->status) || d->status < 0) &&
+			    (NULL != d->name
 			    ? (arg->has_get_peers = ('p' == view))
 			    : (arg->has_get_servers = ('f' == view)))) {
 				json_write_beginobj(jw);
@@ -1709,7 +1767,7 @@ update(void)
 				json_write_endobj(jw);
 			}
 
-			if ((arg->has_get_options = (NULL == d->dir))) {
+			if ((arg->has_get_options = (d->status < 0 || (!d->requested_options && visible)))) {
 				json_write_beginobj(jw);
 				json_write_key(jw, "methodName");
 				json_write_str(jw, "aria2.getOption");
@@ -1721,9 +1779,12 @@ update(void)
 				json_write_str(jw, d->gid);
 				json_write_endarr(jw);
 				json_write_endobj(jw);
+
+				d->requested_options = true;
 			}
 
 			d->status = abs(d->status);
+			++arg;
 		}
 	} else {
 		req->arg = NULL;
@@ -1886,8 +1947,7 @@ on_remove_result(struct json_node *result, struct aria_download *d)
 		refresh();
 	}
 
-	if (NULL != d)
-		unref_download(d);
+	unref_download(d);
 }
 
 static void
@@ -1898,7 +1958,7 @@ aria_purge(struct aria_download *d)
 		return;
 
 	req->handler = (rpc_handler)on_remove_result;
-	req->arg = NULL != d ? ref_download(d) : NULL;
+	req->arg = ref_download(d);
 
 	json_write_key(jw, "method");
 	json_write_str(jw, NULL != d ? "aria2.removeDownloadResult" : "aria2.purgeDownloadResult");
@@ -1954,36 +2014,36 @@ draw_peer(struct aria_download const *d, size_t i, int *y)
 	n = fmt_percent(fmtbuf, p->pieces_have, d->num_pieces);
 	addnstr(fmtbuf, n);
 
-	if (p->peer_download_speed > 0) {
+	if (0 < p->peer_download_speed) {
 		addstr(" @ ");
 		n = fmt_speed(fmtbuf, p->peer_download_speed);
 		addnstr(fmtbuf, n);
 	} else {
-		addstr("   " "    ");
+		addspaces(3 + 4);
 	}
-	addstr("  ");
+	addspaces(2);
 
 	if (p->down_choked) {
 		addstr("----");
-	} else if (p->download_speed > 0) {
+	} else if (0 < p->download_speed) {
 		attr_set(A_BOLD, COLOR_DOWN, NULL);
 		n = fmt_speed(fmtbuf, p->download_speed);
 		addnstr(fmtbuf, n);
 		attr_set(A_NORMAL, 0, NULL);
 	} else {
-		addstr("    ");
+		addspaces(4);
 	}
 	addstr(" ");
 
 	if (p->up_choked) {
 		addstr("----");
-	} else if (p->upload_speed > 0) {
+	} else if (0 < p->upload_speed) {
 		attr_set(A_BOLD, COLOR_UP, NULL);
 		n = fmt_speed(fmtbuf, p->upload_speed);
 		addnstr(fmtbuf, n);
 		attr_set(A_NORMAL, 0, NULL);
 	} else {
-		addstr("    ");
+		addspaces(4);
 	}
 
 	++*y;
@@ -1992,11 +2052,11 @@ draw_peer(struct aria_download const *d, size_t i, int *y)
 static void
 draw_peers(void)
 {
-	if (num_downloads > 0) {
+	if (0 < num_downloads) {
 		struct aria_download *d = downloads[selidx];
 		int y = 0;
 
-		draw_download(d, d, &y);
+		draw_download(d, false, &y);
 
 		if (NULL != d->peers) {
 			size_t i;
@@ -2128,11 +2188,11 @@ aria_download_getfiles(struct aria_download *d)
 static void
 draw_files(void)
 {
-	if (num_downloads > 0) {
+	if (0 < num_downloads) {
 		struct aria_download *d = downloads[selidx];
 		int y = 0;
 
-		draw_download(d, d, &y);
+		draw_download(d, false, &y);
 
 		if (NULL != d->files) {
 			size_t i;
@@ -2154,16 +2214,62 @@ draw_files(void)
 }
 
 static int
-downloadcmp(struct aria_download const **pthis, struct aria_download const **pother)
+downloadcmp(struct aria_download const **pthis, struct aria_download const **pother, void *arg);
+
+/* XXX: Cache value? */
+static struct aria_download const *
+downloadtreebest(struct aria_download const *tree)
+{
+	struct aria_download const *best = tree;
+	struct aria_download const *sibling;
+
+	for (sibling = best->first_child;
+	     NULL != sibling;
+	     sibling = sibling->next_sibling) {
+		struct aria_download const *treebest = downloadtreebest(sibling);
+		if (downloadcmp(&best, &treebest, (void *)1) > 0)
+			best = treebest;
+	}
+
+	return best;
+}
+
+static int
+downloadcmp(struct aria_download const **pthis, struct aria_download const **pother, void *arg)
 {
 	int cmp;
 	uint64_t x, y;
 	struct aria_download const *this = *pthis;
 	struct aria_download const *other = *pother;
-	int this_status = abs(this->status);
-	int other_status = abs(other->status);
+	int8_t this_status, other_status;
 
-	/* cmp = this->belongs_to ==  */
+	if (NULL == arg) {
+	/* if ((this_status == DOWNLOAD_PAUSED || other_status == DOWNLOAD_PAUSED) &&
+	    (this_status == DOWNLOAD_COMPLETE || other_status == DOWNLOAD_COMPLETE))
+		__asm__("int3"); */
+		for (;; this = this->parent) {
+			struct aria_download const *p = other;
+
+			do {
+				if (p == this->parent)
+					return 1;
+				else if (this == p->parent)
+					return -1;
+				else if (this->parent == p->parent) {
+					other = p;
+					goto compare_siblings;
+				}
+			} while (NULL != (p = p->parent));
+		}
+
+	compare_siblings:
+		this = downloadtreebest(this);
+		other = downloadtreebest(other);
+	}
+
+	this_status = abs(this->status);
+	other_status = abs(other->status);
+
 	/* sort by state */
 	cmp = this_status - other_status;
 	if (cmp)
@@ -2176,23 +2282,23 @@ downloadcmp(struct aria_download const **pthis, struct aria_download const **pot
 
 	/* prefer incomplete downloads */
 	cmp = (other->have != other->total) -
-		(this->have != this->total);
+	      (this->have != this->total);
 	if (cmp)
 		return cmp;
 
-	if (DOWNLOAD_ACTIVE == this_status) {
-		/* prefer downloads that almost completed */
-		/* NOTE: total can be null for example in cases if there is no
-		 * information about the download. */
-		x = this->total > 0
-			? this->have * 10000 / this->total
-			: 0;
-		y = other->total > 0
-			? other->have * 10000 / other->total
-			: 0;
-		if (x != y)
-			return x > y ? -1 : 1;
+	/* prefer downloads that almost completed */
+	/* NOTE: total can be null for example in cases if there is no
+	 * information about the download. */
+	x = this->total > 0
+		? this->have * 10000 / this->total
+		: 0;
+	y = other->total > 0
+		? other->have * 10000 / other->total
+		: 0;
+	if (x != y)
+		return x > y ? -1 : 1;
 
+	if (DOWNLOAD_ACTIVE == this_status) {
 		/* prefer higher upload speed */
 		if (this->upload_speed != other->upload_speed)
 			return this->upload_speed > other->upload_speed ? -1 : 1;
@@ -2217,38 +2323,38 @@ downloadcmp(struct aria_download const **pthis, struct aria_download const **pot
 
 /* draw download d at screen line y */
 static void
-draw_download(struct aria_download const *d, struct aria_download const *root, int *y)
+draw_download(struct aria_download const *d, bool draw_parents, int *y)
 {
 	char fmtbuf[5];
 	int n;
 	int tagwidth;
-
-	(void)root;
+	int namex, x;
 
 	attr_set(A_NORMAL, 0, NULL);
 	mvaddnstr(*y, 0, d->gid, 6);
 	addstr(" ");
-	{
-		/* struct aria_download *child = d; */
-		/* struct aria_download *next;
-		for (; child != root && child && (next = child->belongs_to) != child; child = next) */
-		if (d->belongs_to != d && d->belongs_to)
-			addstr("  ");
-	}
 
 	attr_set(A_BOLD, -1, NULL);
 	switch (abs(d->status)) {
 	case DOWNLOAD_UNKNOWN:
-		printw("%31s", "");
-		break;
+		addstr("? ");
+		goto fill_spaces;
 
 	case DOWNLOAD_REMOVED:
 		addstr("- ");
+
+	fill_spaces:
 		attr_set(A_NORMAL, 0, NULL);
+		addspaces(29 +
+			(0 < global.num_download_limited ? 5 : 0) +
+			(0 < global.num_upload_limited ? 6 : 0));
 		break;
 
 	case DOWNLOAD_ERROR: {
-		int usable_width = 29 + (NULL == d->tags ? tag_col_width : 0);
+		int usable_width = 29 +
+			(NULL == d->tags ? tag_col_width : 0) +
+			(0 < global.num_download_limited ? 5 : 0) +
+			(0 < global.num_upload_limited ? 6 : 0);
 		addstr("* ");
 		attr_set(A_BOLD, COLOR_ERR, NULL);
 		printw("%-*.*s", usable_width, usable_width, NULL != d->error_message && (strlen(d->error_message) <= 30 || view == VIEWS[1]) ? d->error_message : "");
@@ -2267,7 +2373,7 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 			n = fmt_space(fmtbuf, d->total);
 			addnstr(fmtbuf, n);
 		} else {
-			addstr("    ");
+			addspaces(4);
 		}
 		addstr(" ");
 
@@ -2288,14 +2394,17 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 		addstr("], ");
 
 	print_files:
-		if (d->num_files > 0) {
+		if (0 < global.num_download_limited)
+			addspaces(5);
+
+		if (0 < d->num_files) {
 			if (d->num_files != d->num_selfiles) {
 				n = fmt_number(fmtbuf, d->num_selfiles);
 				addnstr(fmtbuf, n);
 
 				addstr("/");
 			} else {
-				addstr("     ");
+				addspaces(5);
 			}
 
 			n = fmt_number(fmtbuf, d->num_files);
@@ -2303,31 +2412,38 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 
 			addstr(1 == d->num_files ? " file " : " files");
 		} else {
-			addstr("    " " " "    " "      ");
+			addspaces(5 + 4 + 6);
 		}
+		if (0 < global.num_upload_limited)
+			addspaces(6);
 		break;
 
 	case DOWNLOAD_COMPLETE:
-		addstr("          ");
-
 		attr_set(A_NORMAL, 0, NULL);
+
+		addspaces(10);
 
 		n = fmt_space(fmtbuf, d->total);
 		addnstr(fmtbuf, n);
 
 		addstr(",      ");
 
+		if (0 < global.num_download_limited)
+			addspaces(5);
+
 		n = fmt_number(fmtbuf, d->num_selfiles);
 		addnstr(fmtbuf, n);
-		addstr(" files");
+		addstr(1 == d->num_selfiles ? " file " : " files");
+		if (0 < global.num_upload_limited)
+			addspaces(6);
 		break;
 
 	case DOWNLOAD_ACTIVE:
 		addstr(d->verified == 0 ? "> " : "v ");
 		attr_set(A_NORMAL, 0, NULL);
 
-		if (d->verified == 0) {
-			if (d->download_speed > 0) {
+		if (0 == d->verified) {
+			if (0 < d->download_speed) {
 				attr_set(A_BOLD, COLOR_DOWN, NULL);
 				n = fmt_percent(fmtbuf, d->have, d->total);
 				addnstr(fmtbuf, n);
@@ -2338,6 +2454,14 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 				attr_set(A_BOLD, COLOR_DOWN, NULL);
 				n = fmt_speed(fmtbuf, d->download_speed);
 				addnstr(fmtbuf, n);
+
+				if (0 < d->download_speed_limit) {
+					attr_set(A_NORMAL, 0, NULL);
+					addstr("/");
+					n = fmt_speed(fmtbuf, d->download_speed_limit);
+					addnstr(fmtbuf, n);
+				} else if (0 < global.num_download_limited)
+					addspaces(5);
 				addstr(" ");
 			} else {
 				addstr(" ");
@@ -2345,18 +2469,21 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 				addnstr(fmtbuf, n);
 
 				addstr("[");
-				attr_set(d->have == d->total ? A_NORMAL : A_BOLD, COLOR_DOWN, NULL);
+				attr_set(A_NORMAL, COLOR_DOWN, NULL);
 				n = fmt_percent(fmtbuf, d->have, d->total);
 				addnstr(fmtbuf, n);
 				attr_set(A_NORMAL, 0, NULL);
 				addstr("] ");
+
+				if (0 < global.num_download_limited)
+					addspaces(5);
 			}
 		} else if (d->verified == UINT64_MAX) {
 			addstr(" ");
 			n = fmt_space(fmtbuf, d->have);
 			addnstr(fmtbuf, n);
 
-			addstr("        ");
+			addspaces(8 + (0 < global.num_download_limited ? 5 : 0));
 		} else {
 			addstr(" ");
 			n = fmt_space(fmtbuf, d->verified);
@@ -2366,32 +2493,44 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 			n = fmt_percent(fmtbuf, d->verified, d->total);
 			addnstr(fmtbuf, n);
 			addstr("] ");
+
+			if (0 < global.num_download_limited)
+				addspaces(5);
 		}
 
 		attr_set(A_NORMAL, COLOR_CONN, NULL);
-		if (d->num_connections > 0) {
+		if (0 < d->num_connections) {
 			n = fmt_number(fmtbuf, d->num_connections);
 			addnstr(fmtbuf, n);
 		} else {
-			addstr("    ");
+			addspaces(4);
 		}
 		attr_set(A_NORMAL, 0, NULL);
 
-		if (d->uploaded > 0) {
-			if (d->upload_speed > 0)
+		if (0 < d->uploaded || 0 < d->seed_ratio) {
+			if (0 < d->upload_speed)
 				attr_set(A_BOLD, COLOR_UP, NULL);
 			addstr(" ");
 
 			n = fmt_space(fmtbuf, d->uploaded);
 			addnstr(fmtbuf, n);
 
-			if (d->upload_speed > 0) {
+			if (0 < d->upload_speed) {
 				attr_set(A_NORMAL, 0, NULL);
 				addstr(" @ ");
 
 				attr_set(A_BOLD, COLOR_UP, NULL);
 				n = fmt_speed(fmtbuf, d->upload_speed);
 				addnstr(fmtbuf, n);
+
+				if (0 < d->upload_speed_limit) {
+					attr_set(A_NORMAL, 0, NULL);
+					addstr("/");
+					n = fmt_speed(fmtbuf, d->upload_speed_limit);
+					addnstr(fmtbuf, n);
+					addstr(" ");
+				} else if (0 < global.num_upload_limited)
+					addspaces(6);
 			} else {
 				addstr("[");
 
@@ -2402,12 +2541,22 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 
 				attr_set(A_NORMAL, 0, NULL);
 
-				addstr("]");
+				if (0 < d->seed_ratio) {
+					attr_set(A_NORMAL, 0, NULL);
+					addstr("/");
+					n = fmt_percent(fmtbuf, d->seed_ratio, 100);
+					addnstr(fmtbuf, n);
+					addstr("]");
+				} else {
+					addstr("]");
+					if (0 < global.num_upload_limited)
+						addspaces(6);
+				}
 			}
 
 			attr_set(A_NORMAL, 0, NULL);
 		} else {
-			printw("%12s", "");
+			addspaces(12 + (0 < global.num_upload_limited ? 6 : 0));
 		}
 
 		break;
@@ -2433,14 +2582,30 @@ draw_download(struct aria_download const *d, struct aria_download const *root, i
 	} else {
 		tagwidth = 0;
 	}
-	if (0 < tag_col_width) {
+	if (0 < tag_col_width)
 		printw("%*.s", tag_col_width - tagwidth, "");
-	}
 
 skip_tags:
 	addstr(" ");
-	curx = getcurx(stdscr);
-	addstr(d->display_name);
+	namex = x = curx = getcurx(stdscr);
+	if (draw_parents && NULL != d->parent) {
+		struct aria_download const *parent;
+
+		for (parent = d; NULL != parent->parent; parent = parent->parent)
+			x += 2;
+		x += 1;
+		namex = x;
+
+		if (d->follows)
+			mvaddstr(*y, x -= 3, "⮡  ");
+		else
+			mvaddstr(*y, x -= 3, NULL != d->next_sibling ? "├─ " : "└─ ");
+
+		for (parent = d->parent; NULL != parent; parent = parent->parent)
+			mvaddstr(*y, x -= 2, NULL != d->next_sibling ? "│ " : "  ");
+	}
+
+	mvaddstr(*y, namex, d->display_name);
 	clrtoeol();
 	++*y;
 
@@ -2469,7 +2634,7 @@ draw_downloads(void)
 		assert(0 <= topidx);
 		for (line = 0; line < height;) {
 			if ((size_t)(topidx + line) < num_downloads) {
-				draw_download(downloads[topidx + line], NULL, &line);
+				draw_download(downloads[topidx + line], true, &line);
 			} else {
 				attr_set(A_NORMAL, COLOR_EOF, NULL);
 				mvaddstr(line, 0, "~");
@@ -2487,7 +2652,7 @@ static void
 on_downloads_change(int stickycurs)
 {
 	/* re-sort downloads list */
-	if (num_downloads > 0) {
+	if (0 < num_downloads) {
 		char selgid[sizeof ((struct aria_download *)0)->gid];
 
 		if (selidx < 0)
@@ -2497,11 +2662,11 @@ on_downloads_change(int stickycurs)
 			selidx = num_downloads - 1;
 		memcpy(selgid, downloads[selidx]->gid, sizeof selgid);
 
-		qsort(downloads, num_downloads, sizeof *downloads, (int(*)(void const *, void const *))downloadcmp);
+		qsort_r(downloads, num_downloads, sizeof *downloads, (int(*)(void const *, void const *, void*))downloadcmp, NULL);
 
 		/* move selection if download moved */
 		if (stickycurs && 0 != memcmp(selgid, downloads[selidx]->gid, sizeof selgid)) {
-			struct aria_download **dd = get_download_bygid(selgid, 1);
+			struct aria_download **dd = get_download_bygid(selgid);
 
 			assert("selection disappeared after sorting" && NULL != dd);
 			selidx = dd - downloads;
@@ -2525,7 +2690,7 @@ draw_cursor(void)
 	int const h = view == VIEWS[1] ? getmainheight() : 1;
 	int const oldtopidx = topidx;
 
-	(void)curs_set(num_downloads > 0);
+	(void)curs_set(0 < num_downloads);
 
 	if (selidx < 0)
 		selidx = 0;
@@ -2583,8 +2748,8 @@ update_title(void)
 	if (NULL == ti.tsl || NULL == ti.fsl)
 		return;
 
-	ndown = fmt_speed(sdown, globalstat.download_speed);
-	nup = fmt_speed(sup, globalstat.upload_speed);
+	ndown = fmt_speed(sdown, global.download_speed_total);
+	nup = fmt_speed(sup, global.upload_speed_total);
 	dprintf(STDERR_FILENO,
 			"%s"
 			"↓ %.*s ↑ %.*s @ %s:%u – aria2t"
@@ -2604,6 +2769,7 @@ draw_statusline(void)
 	int n;
 	uint8_t i;
 	bool first = true;
+	uint64_t speed;
 
 	update_title();
 
@@ -2617,10 +2783,10 @@ draw_statusline(void)
 
 	printw("%c %4d/%d",
 			view,
-			num_downloads > 0 ? selidx + 1 : 0, num_downloads);
+			0 < num_downloads ? selidx + 1 : 0, num_downloads);
 
 	for (i = DOWNLOAD_UNKNOWN; i < DOWNLOAD_COUNT; ++i) {
-		if (0 == globalstat.num_perstatus[i])
+		if (0 == global.num_perstatus[i])
 			continue;
 
 		addstr(first ? " (" : " ");
@@ -2629,7 +2795,7 @@ draw_statusline(void)
 		attr_set(A_BOLD, i == DOWNLOAD_ERROR ? COLOR_ERR : 0, NULL);
 		addnstr(DOWNLOAD_SYMBOLS + i, 1);
 		attr_set(A_NORMAL, i == DOWNLOAD_ERROR ? COLOR_ERR : 0, NULL);
-		printw("%d", globalstat.num_perstatus[i]);
+		printw("%d", global.num_perstatus[i]);
 		attr_set(A_NORMAL, 0, NULL);
 	}
 
@@ -2654,44 +2820,45 @@ draw_statusline(void)
 	mvaddstr(y, x -= 1, " ");
 
 	/* upload */
-
-	if (globalstat.upload_speed_limit > 0) {
-		n = fmt_speed(fmtbuf, globalstat.upload_speed_limit);
+	if (0 < global.upload_speed_limit) {
+		n = fmt_speed(fmtbuf, global.upload_speed_limit);
 		mvaddnstr(y, x -= n, fmtbuf, n);
 		mvaddstr(y, x -= 1, "/");
 	}
 
-	if (globalstat.upload_speed > 0)
+	speed = 0 == action.num_sel ? global.upload_speed : global.upload_speed_total;
+	if (0 < speed)
 		attr_set(A_BOLD, COLOR_UP, NULL);
-	n = fmt_speed(fmtbuf, globalstat.upload_speed);
+	n = fmt_speed(fmtbuf, speed);
 	mvaddnstr(y, x -= n, fmtbuf, n);
 
 	mvaddstr(y, x -= 4, "] @ ");
-	n = fmt_percent(fmtbuf, globalstat.uploaded_total, globalstat.have_total);
+	n = fmt_percent(fmtbuf, global.uploaded_total, global.have_total);
 	mvaddnstr(y, x -= n, fmtbuf, n);
 	mvaddstr(y, x -= 1, "[");
 
-	n = fmt_space(fmtbuf, globalstat.uploaded_total);
+	n = fmt_space(fmtbuf, global.uploaded_total);
 	mvaddnstr(y, x -= n, fmtbuf, n);
 
 	mvaddstr(y, x -= 3, " ↑ ");
 	attr_set(A_NORMAL, 0, NULL);
 
 	/* download */
-	if (globalstat.download_speed_limit > 0) {
-		n = fmt_speed(fmtbuf, globalstat.download_speed_limit);
+	if (0 < global.download_speed_limit) {
+		n = fmt_speed(fmtbuf, global.download_speed_limit);
 		mvaddnstr(y, x -= n, fmtbuf, n);
 		mvaddstr(y, x -= 1, "/");
 	}
 
-	if (globalstat.download_speed > 0)
+	speed = 0 == action.num_sel ? global.download_speed : global.download_speed_total;
+	if (0 < speed)
 		attr_set(A_BOLD, COLOR_DOWN, NULL);
-	n = fmt_speed(fmtbuf, globalstat.download_speed);
+	n = fmt_speed(fmtbuf, speed);
 	mvaddnstr(y, x -= n, fmtbuf, n);
 
 	mvaddstr(y, x -= 3, " @ ");
 
-	n = fmt_space(fmtbuf, globalstat.have_total);
+	n = fmt_space(fmtbuf, global.have_total);
 	mvaddnstr(y, x -= n, fmtbuf, n);
 
 	mvaddstr(y, x -= 3, " ↓ ");
@@ -2726,7 +2893,7 @@ foreach_download(void(*cb)(struct aria_download const *))
 static void
 on_update_all(struct json_node *result, void *arg)
 {
-	bool some_insufficient = false;
+	size_t downloadidx = 0;
 
 	(void)arg;
 
@@ -2742,7 +2909,6 @@ on_update_all(struct json_node *result, void *arg)
 	do {
 		struct json_node *downloads_list;
 		struct json_node *node;
-		uint32_t downloadidx;
 
 		if (json_arr != json_type(result)) {
 			error_handler(result);
@@ -2754,17 +2920,22 @@ on_update_all(struct json_node *result, void *arg)
 		if (json_isempty(downloads_list))
 			continue;
 
-		downloadidx = num_downloads;
 		node = json_children(downloads_list);
 		do {
-			struct aria_download *d, **dd = new_download();
+			struct aria_download *d;
+			/* XXX: parse_download's belongsTo and followedBy may
+			 * create the download before this update arrives, so
+			 * we check if only we modified the list */
+			struct aria_download **dd = downloadidx == num_downloads
+				? new_download()
+				: get_download_bygid(json_get(node, "gid")->val.str);
 			if (NULL == dd)
 				continue;
 			d = *dd;
 
 			/* we did it initially but we have to mark it now since
 			 * we only received download object now */
-			d->requested_bittorrent = 1;
+			d->initialized = true;
 
 			parse_download(d, node);
 			if (DOWNLOAD_WAITING == abs(d->status)) {
@@ -2772,9 +2943,8 @@ on_update_all(struct json_node *result, void *arg)
 				d->queue_index = (num_downloads - 1) - downloadidx;
 			}
 
-			some_insufficient |= download_insufficient(d);
-
-			download_changed(d, dd);
+			download_changed(d);
+			++downloadidx;
 		} while (NULL != (node = json_next(node)));
 
 	} while (NULL != (result = json_next(result)));
@@ -2808,10 +2978,8 @@ on_update_all(struct json_node *result, void *arg)
 		on_downloads_change(0);
 		refresh();
 
-		if (some_insufficient)
-			update();
-		else
-			set_periodic_update();
+		/* must update options */
+		update();
 	}
 }
 
@@ -2870,6 +3038,8 @@ run_action(struct aria_download *d, char const *name, ...)
 	/* become foreground process */
 	tcsetpgrp(STDERR_FILENO, getpgrp());
 	refresh();
+
+	update_title();
 
 	if (WIFEXITED(status) && 127 == WEXITSTATUS(status)) {
 		return -1;
@@ -2957,19 +3127,24 @@ on_options(struct json_node *result, struct aria_download *d)
 	if (NULL != result) {
 		clear_error_message();
 
-		if (NULL == d || upgrade_download(d, NULL))
+		if (NULL == d || upgrade_download(d, NULL)) {
 			parse_options(result, (parse_options_cb)parse_option, d);
+
+			draw_main();
+			refresh();
+		}
 	}
 
-	if (NULL != d)
-		unref_download(d);
+	unref_download(d);
 }
 
 static void
 on_options_change(struct json_node *result, struct aria_download *d)
 {
 	if (NULL != result)
-		update_options(d, 0);
+		update_options(d, false);
+
+	unref_download(d);
 }
 
 static void
@@ -3011,7 +3186,7 @@ on_show_options(struct json_node *result, struct aria_download *d)
 	(void)fstat(fileno(f), &stafter);
 
 	/* not modified */
-	if (stbefore.st_mtim.tv_sec == stafter.st_mtim.tv_sec)
+	if (stafter.st_mtim.tv_sec <= stbefore.st_mtim.tv_sec)
 		goto out_fclose;
 
 	req = new_rpc();
@@ -3019,7 +3194,7 @@ on_show_options(struct json_node *result, struct aria_download *d)
 		goto out_fclose;
 
 	req->handler = (rpc_handler)on_options_change;
-	req->arg = NULL != d ? ref_download(d) : NULL;
+	req->arg = ref_download(d);
 
 	json_write_key(jw, "method");
 	json_write_str(jw, NULL != d ? "aria2.changeOption" : "aria2.changeGlobalOption");
@@ -3061,21 +3236,20 @@ out_fclose:
 	fclose(f);
 
 out:
-	if (NULL != d)
-		unref_download(d);
+	unref_download(d);
 }
 
 /* if user requested it, show it. otherwise just update returned values in the
  * background */
 static void
-update_options(struct aria_download *d, int user)
+update_options(struct aria_download *d, bool user)
 {
 	struct rpc_request *req = new_rpc();
 	if (NULL == req)
 		return;
 
 	req->handler = (rpc_handler)(user ? on_show_options : on_options);
-	req->arg = NULL != d ? ref_download(d) : NULL;
+	req->arg = ref_download(d);
 
 	json_write_key(jw, "method");
 	json_write_str(jw, NULL != d ? "aria2.getOption" : "aria2.getGlobalOption");
@@ -3096,7 +3270,7 @@ update_options(struct aria_download *d, int user)
 static void
 show_options(struct aria_download *d)
 {
-	update_options(d, 1);
+	update_options(d, true);
 }
 
 /* select (last) newly added download and write back errorneous files */
@@ -3122,11 +3296,11 @@ on_downloads_add(struct json_node *result, void *arg)
 
 			if (json_str == json_type(gid)) {
 				/* single GID returned */
-				if (NULL != (dd = get_download_bygid(gid->val.str, 1)))
+				if (NULL != (dd = get_download_bygid(gid->val.str)))
 					selidx = dd - downloads;
 			} else {
 				/* get first GID of the array */
-				if (NULL != (dd = get_download_bygid(json_children(gid)->val.str, 1)))
+				if (NULL != (dd = get_download_bygid(json_children(gid)->val.str)))
 					selidx = dd - downloads;
 			}
 		}
@@ -3410,9 +3584,12 @@ update_all(void)
 			json_write_str(jw, "verifyIntegrityPending");
 			json_write_str(jw, "uploadSpeed");
 			json_write_str(jw, "downloadSpeed");
+
 			json_write_str(jw, "bittorrent");
 			json_write_str(jw, "numPieces");
 			json_write_str(jw, "pieceLength");
+			json_write_str(jw, "following");
+			json_write_str(jw, "belongsTo");
 		}
 		if (act_visual == action.kind ? is_local : action.uses_files)
 			json_write_str(jw, "files");
@@ -3496,6 +3673,18 @@ switch_view(int next)
 }
 
 static void
+select_download(struct aria_download const *d)
+{
+	struct aria_download **dd;
+
+	if (NULL != d && upgrade_download(d, &dd)) {
+		selidx = dd - downloads;
+		draw_cursor();
+		refresh();
+	}
+}
+
+static void
 stdin_read(void)
 {
 	int ch;
@@ -3511,7 +3700,7 @@ stdin_read(void)
 
 		case 'J':
 		case 'K':
-			if (num_downloads > 0)
+			if (0 < num_downloads)
 				aria_download_repos(downloads[selidx], ch == 'J' ? 1 : -1, POS_CUR);
 			break;
 
@@ -3522,15 +3711,24 @@ stdin_read(void)
 			refresh();
 			break;
 
+		case 'h':
+			if (0 < num_downloads)
+				select_download(downloads[selidx]->parent);
+			break;
+
+		case 'l':
+			if (0 < num_downloads)
+				select_download(downloads[selidx]->first_child);
+			break;
+
+		case 'n':
+			if (0 < num_downloads)
+				select_download(downloads[selidx]->next_sibling);
+			break;
+
 		case 'N':
-			if (num_downloads > 0) {
-				struct aria_download *d = downloads[selidx]->following;
-				if (NULL != d) {
-					selidx = get_download_bygid(d->gid, 1) - downloads;
-					draw_cursor();
-					refresh();
-				}
-			}
+			if (0 < num_downloads)
+				select_download(download_prev_sibling(downloads[selidx]));
 			break;
 
 		case 'v':
@@ -3583,7 +3781,7 @@ stdin_read(void)
 
 		case 's':
 		case 'p':
-			if (num_downloads > 0)
+			if (0 < num_downloads)
 				aria_pause(downloads[selidx], ch == 'p', do_forced);
 			do_forced = 0;
 			break;
@@ -3602,12 +3800,12 @@ stdin_read(void)
 
 		case 'i':
 		case 'I':
-			show_options(num_downloads > 0 && ch == 'i' ? downloads[selidx] : NULL);
+			show_options(0 < num_downloads && ch == 'i' ? downloads[selidx] : NULL);
 			break;
 
 		case 'D':
 		case KEY_DC: /*delete*/
-			if (num_downloads > 0) {
+			if (0 < num_downloads) {
 				remove_download(downloads[selidx], do_forced);
 				do_forced = 0;
 			}
@@ -3618,7 +3816,7 @@ stdin_read(void)
 			break;
 
 		case 'x':
-			if (num_downloads > 0)
+			if (0 < num_downloads)
 				aria_purge(downloads[selidx]);
 			break;
 
@@ -3627,6 +3825,7 @@ stdin_read(void)
 			break;
 
 		case 'q':
+		case CONTROL('['):
 			if (view != VIEWS[1]) {
 				view = VIEWS[1];
 				oldselidx = -1; /* force redraw */
@@ -3644,7 +3843,7 @@ stdin_read(void)
 			} else {
 				endwin();
 
-				if (num_downloads > 0) {
+				if (0 < num_downloads) {
 					struct aria_download const *d = downloads[selidx];
 					printf("%s\n", d->gid);
 				}
@@ -3908,6 +4107,7 @@ main(int argc, char *argv[])
 
 	json_writer_init(jw);
 
+	atexit(clear_downloads);
 	atexit(cleanup_session_file);
 
 	sigemptyset(&ss);
@@ -3936,7 +4136,7 @@ main(int argc, char *argv[])
 		noecho();
 		/* do not translate '\n's */
 		nonl();
-		/* make `getch()` non-blocking */
+		/* make getch() non-blocking */
 		nodelay(stdscr, TRUE);
 		/* catch special keys */
 		keypad(stdscr, TRUE);
