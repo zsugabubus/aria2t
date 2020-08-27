@@ -1,5 +1,6 @@
 #ifndef WEBSOCKET_H
 #define WEBSOCKET_H
+
 #include <netinet/in.h>
 
 void ws_connect(char const *host, in_port_t port);

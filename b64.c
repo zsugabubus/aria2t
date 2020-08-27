@@ -27,8 +27,10 @@ b64_enc(const unsigned char *str, size_t n, size_t *outn)
 #if defined(__GNUC__) || defined(__clang__)
 		__builtin_unreachable();
 #endif
+		/* FALLTHROUGH */
 	case 0:
 		break;
+
 	case 1:
 		out[j + 0] = BASE64_CHARS[str[i + 0] >> 2];
 		out[j + 1] = BASE64_CHARS[(str[i + 0] & 0x3) << 4];
@@ -36,6 +38,7 @@ b64_enc(const unsigned char *str, size_t n, size_t *outn)
 		out[j + 3] = '=';
 		j += 4;
 		break;
+
 	case 2:
 		out[j + 0] = BASE64_CHARS[str[i] >> 2];
 		out[j + 1] = BASE64_CHARS[((str[i] & 0x3) << 4) | (str[i + 1] >> 4)];
