@@ -10,7 +10,9 @@ minimal but complete.
 * **Scriptable.** Bind an executable to any key.
 * **Batteries included.** Most RPC commands covered.
 
-## Dependencies
+## Installation
+
+### Dependencies
 
 * `cc -std=c11`
 * `coreutils`
@@ -19,7 +21,8 @@ minimal but complete.
 * `ncursesw`
 * `sed`
 
-## Installation
+### Build from source
+
 ```
 git clone https://github.com/zsugabubus/aria2t &&
 cd aria2t &&
@@ -28,13 +31,14 @@ make &&
 make install
 ```
 
-## Usage
+## Getting started
 
 ```
 env ARIA_RPC_SECRET=mysecret ARIA_RPC_PORT=12345 aria2t
 ```
 
-For available commands please refer to `aria2t(1)`.
+For available commands please refer to `aria2t(1)`. You can open manual page
+using `man aria2t` after installation.
 
 ## License
 
