@@ -1,12 +1,12 @@
 #!/usr/bin/make -f
 PREFIX ?= /usr/local
 MANPREFIX ?= /usr/share/man
+
 INSTALL ?= install
 RM ?= rm -f
-GZIP ?= gzip --best --force
 PKGCONFIG ?= pkg-config
 
-TARGETS := aria2t
+TARGET := aria2t
 CFLAGS += -std=c11 -g -O2 -pedantic -Wall -Wextra
 
 PACKAGES := ncursesw
@@ -14,7 +14,7 @@ LDLIBS += -lncursesw
 # LDLIBS  += $(shell $(PKGCONFIG) --libs $(PACKAGES))
 LDFLAGS += $(shell $(PKGCONFIG) --cflags $(PACKAGES))
 
-all : $(TARGETS)
+all : $(TARGET)
 
 keys.in : aria2t.c genkeys
 	./genkeys
@@ -25,18 +25,25 @@ jeezson/% :
 fourmat/% :
 	git submodule update --init fourmat
 
-$(TARGETS) : %: keys.in %.c program.? websocket.? b64.? jeezson/jeezson.? fourmat/fourmat.? Makefile
+$(TARGET) : %: keys.in %.c program.? websocket.? b64.? jeezson/jeezson.? fourmat/fourmat.? Makefile
 	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $(LDLIBS) $@.c program.c websocket.c b64.c jeezson/jeezson.c fourmat/fourmat.c
 
-install : aria2t
-	$(INSTALL) -Ds -t $(DESTDIR)$(PREFIX)/bin $<
-	$(INSTALL) -Dm644 -t $(DESTDIR)$(MANPREFIX)/man1 $<.1
-	$(GZIP) $(DESTDIR)$(MANPREFIX)/man1/$<.1
+installdirs :
+	$(INSTALL) -d $(DESTDIR)$(PREFIX)/bin \
+	              $(DESTDIR)$(MANPREFIX)/man1
+
+install : aria2t installdirs
+	$(INSTALL) $< $(DESTDIR)$(PREFIX)/bin
+	-$(INSTALL) -m 0644 $<.1 $(DESTDIR)$(MANPREFIX)/man1
+
+install-strip :
+	$(MAKE) INSTALL='$(INSTALL) -s' install
 
 uninstall :
-	$(RM) $(patsubst %,$(DESTDIR)$(PREFIX)/%,$(TARGETS)) $(patsubst %,$(DESTDIR)$(MANPREFIX)/man1/%.1.gz,$(TARGETS))
+	$(RM) $(patsubst %,$(DESTDIR)$(PREFIX)/%,$(TARGET)) \
+	      $(patsubst %,$(DESTDIR)$(MANPREFIX)/man1/%.1.gz,$(TARGET))
 
 clean :
-	$(RM) *.in $(TARGETS)
+	$(RM) keys.in $(TARGET)
 
-.PHONY: all bootstrap install uninstall clean
+.PHONY: all clean dist install install-strip installdirs uninstall
