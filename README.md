@@ -26,7 +26,6 @@ minimal but complete.
 ```
 git clone https://github.com/zsugabubus/aria2t &&
 cd aria2t &&
-make bootstrap &&
 make &&
 make install
 ```
