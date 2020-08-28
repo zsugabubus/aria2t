@@ -59,7 +59,7 @@
 enum pos_how { POS_SET, POS_CUR, POS_END };
 
 struct peer {
-	char peer_id[20];
+	uint8_t peer_id[20];
 
 	char ip[INET6_ADDRSTRLEN];
 	in_port_t port;
@@ -70,10 +70,10 @@ struct peer {
 	uint32_t pieces_have;
 	struct timespec latest_change; /* latest time when pieces_have changed */
 
-	uint32_t peer_download_speed;
+	uint64_t peer_download_speed;
 
-	uint64_t download_speed;
-	uint64_t upload_speed;
+	uint64_t download_speed; /* from peer */
+	uint64_t upload_speed; /* to peer */
 };
 
 struct server {
@@ -833,22 +833,24 @@ parse_file_servers(struct file *f, struct json_node const *node)
 static void
 parse_peer_id(struct peer *p, char *peer_id)
 {
-#define HEX2NR(ch) (ch <= '9' ? ch - '0' : ch - 'A' + 10)
+#define HEX2NR(ch) (uint8_t)(ch <= '9' ? ch - '0' : ch - 'A' + 10)
 
-	char *s = peer_id, *d = p->peer_id;
+	char *src = peer_id;
+	uint8_t *dst = p->peer_id;
 
-	for (; d != p->peer_id + sizeof p->peer_id; ++d) {
-		if ('%' == *s) {
-			*d = (HEX2NR(s[1]) << 4) | HEX2NR(s[2]);
-			s += 3;
+	for (; dst != p->peer_id + sizeof p->peer_id; ++dst) {
+		if ('%' == *src) {
+			*dst = (HEX2NR(src[1]) << 4) | HEX2NR(src[2]);
+			src += 3;
 		} else {
-			*d = *s;
-			s += 1;
+			*dst = *src;
+			src += 1;
 		}
 	}
 
+	assert('\0' == *src);
+
 #undef HEX2NR
-	assert('\0' == *s);
 }
 
 static void
@@ -967,10 +969,11 @@ parse_peers(struct download *d, struct json_node const *node)
 		/* compute peer speed */
 		/* if peer has not reached 100% we assume it downloads continously */
 		if (p->pieces_have < d->num_pieces) {
+#define NS_PER_SEC UINT64_C(1000000000)
+
 			uint64_t pieces_change;
 			uint64_t bytes_change;
 			uint64_t time_ns_change;
-#define NS_PER_SEC UINT64_C(1000000000)
 
 			pieces_change =
 				p->pieces_have != oldp->pieces_have
