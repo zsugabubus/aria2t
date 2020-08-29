@@ -45,5 +45,7 @@ uninstall :
 
 clean :
 	$(RM) keys.in $(TARGET)
+	$(MAKE) -C jeezson clean
+	$(MAKE) -C fourmat clean
 
 .PHONY: all clean dist install install-strip installdirs uninstall
