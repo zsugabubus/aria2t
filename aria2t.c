@@ -559,9 +559,9 @@ error_handler(struct json_node const *error)
 }
 
 static void
-free_rpc(struct rpc_request *req)
+free_rpc(struct rpc_request *rpc)
 {
-	req->handler = NULL;
+	rpc->handler = NULL;
 }
 
 static void
@@ -631,7 +631,7 @@ on_ws_message(char *msg, uint64_t msglen)
 
 	if (NULL != (id = json_get(nodes, "id"))) {
 		struct json_node const *const result = json_get(nodes, "result");
-		struct rpc_request *const req = &rpc_requests[(unsigned)id->val.num];
+		struct rpc_request *const rpc = &rpc_requests[(unsigned)id->val.num];
 
 		if (NULL == result)
 			error_handler(json_get(nodes, "error"));
@@ -641,9 +641,9 @@ on_ws_message(char *msg, uint64_t msglen)
 		 * contains id=null, so we cannot get back the handler. the
 		 * best we can do is to ignore and may leak a resource inside
 		 * data. */
-		if (NULL != req->handler) {
-			req->handler(result, req->arg);
-			free_rpc(req);
+		if (NULL != rpc->handler) {
+			rpc->handler(result, rpc->arg);
+			free_rpc(rpc);
 		}
 
 	} else if (NULL != (method = json_get(nodes, "method"))) {
@@ -658,19 +658,22 @@ on_ws_message(char *msg, uint64_t msglen)
 static struct rpc_request *
 new_rpc(void)
 {
-	uint8_t n;
-	struct rpc_request *req;
+	uint8_t i;
+	struct rpc_request *rpc;
 
-	for (n = array_len(rpc_requests); n > 0;) {
-		req = &rpc_requests[--n];
-		if (NULL == req->handler)
+	for (i = 0; i < array_len(rpc_requests); ++i) {
+		rpc = &rpc_requests[i];
+
+		if (NULL == rpc->handler)
 			goto found;
 	}
+
+	set_error_message("too much pending messages");
 
 	return NULL;
 
 found:
-	req->handler = default_handler;
+	rpc->handler = default_handler;
 
 	json_writer_empty(jw);
 	json_write_beginobj(jw);
@@ -679,9 +682,9 @@ found:
 	json_write_str(jw, "2.0");
 
 	json_write_key(jw, "id");
-	json_write_int(jw, (int)(req - rpc_requests));
+	json_write_int(jw, (int)(rpc - rpc_requests));
 
-	return req;
+	return rpc;
 }
 
 
@@ -691,11 +694,11 @@ clear_rpc_requests(void)
 	uint8_t n = array_len(rpc_requests);
 
 	while (0 < n) {
-		struct rpc_request *req = &rpc_requests[--n];
+		struct rpc_request *rpc = &rpc_requests[--n];
 
-		if (NULL != req->handler) {
-			req->handler(NULL, req->arg);
-			free_rpc(req);
+		if (NULL != rpc->handler) {
+			rpc->handler(NULL, rpc->arg);
+			free_rpc(rpc);
 		}
 	}
 }
@@ -717,10 +720,14 @@ parse_session_info(struct json_node const *result)
 }
 
 static void
-do_rpc(void)
+do_rpc(struct rpc_request *rpc)
 {
 	json_write_endobj(jw);
-	ws_write(jw->buf, jw->len);
+	if (-1 == ws_write(jw->buf, jw->len)) {
+		set_error_message("write: %s",
+				strerror(errno));
+		free_rpc(rpc);
+	}
 }
 
 static void
@@ -1488,15 +1495,7 @@ parse_option(char const *option, char const *value, struct download *d)
 static void
 try_connect(void)
 {
-	if (try_connect != periodic) {
-		periodic = try_connect;
-		period.tv_sec = 1;
-		period.tv_nsec = 0;
-	} else {
-		period.tv_sec *= 2;
-	}
-
-	ws_connect(remote_host, remote_port);
+	ws_open(remote_host, remote_port);
 }
 
 struct update_arg {
@@ -1613,12 +1612,12 @@ getmainheight(void)
 static void
 update(void)
 {
-	struct rpc_request *req;
+	struct rpc_request *rpc;
 
-	if (NULL == (req = new_rpc()))
+	if (NULL == (rpc = new_rpc()))
 		return;
 
-	req->handler = (rpc_handler)update_handler;
+	rpc->handler = (rpc_handler)update_handler;
 
 	json_write_key(jw, "method");
 	json_write_str(jw, "system.multicall");
@@ -1669,10 +1668,10 @@ update(void)
 		while (++status <= botstatus);
 
 		if (NULL == (arg = malloc(arglen * sizeof *arg))) {
-			free_rpc(req);
+			free_rpc(rpc);
 			return;
 		}
-		req->arg = arg;
+		rpc->arg = arg;
 
 		for (; dd < end; ++dd) {
 			struct download *d = *dd;
@@ -1805,7 +1804,7 @@ update(void)
 			++arg;
 		}
 	} else {
-		req->arg = NULL;
+		rpc->arg = NULL;
 	}
 
 	json_write_endarr(jw); /* }}} */
@@ -1813,7 +1812,7 @@ update(void)
 	json_write_endarr(jw); /* }}} */
 
 	periodic = NULL;
-	do_rpc();
+	do_rpc(rpc);
 }
 
 static void
@@ -1825,9 +1824,9 @@ change_download_position(struct download *d, int32_t pos, enum pos_how how)
 		"POS_END"
 	};
 
-	struct rpc_request *req = new_rpc();
+	struct rpc_request *rpc;
 
-	if (NULL == req)
+	if (NULL == (rpc = new_rpc()))
 		return;
 
 	json_write_key(jw, "method");
@@ -1845,15 +1844,15 @@ change_download_position(struct download *d, int32_t pos, enum pos_how how)
 	json_write_str(jw, POS_HOW[how]);
 	json_write_endarr(jw);
 
-	do_rpc();
+	do_rpc(rpc);
 }
 
 static void
 shutdown_aria(int force)
 {
-	struct rpc_request *req = new_rpc();
+	struct rpc_request *rpc;
 
-	if (NULL == req)
+	if (NULL == (rpc = new_rpc()))
 		return;
 
 	json_write_key(jw, "method");
@@ -1865,7 +1864,7 @@ shutdown_aria(int force)
 	json_write_str(jw, secret_token);
 	json_write_endarr(jw);
 
-	do_rpc();
+	do_rpc(rpc);
 }
 
 static void
@@ -1878,13 +1877,13 @@ action_exit(struct json_node const *result, void *arg)
 static void
 pause_download(struct download *d, bool pause, bool force)
 {
-	struct rpc_request *req = new_rpc();
+	struct rpc_request *rpc;
 
-	if (NULL == req)
+	if (NULL == (rpc = new_rpc()))
 		return;
 
 	if (act_visual != action.kind)
-		req->handler = action_exit;
+		rpc->handler = action_exit;
 
 	if (0 == action.num_sel || NULL != d) {
 		json_write_key(jw, "method");
@@ -1937,7 +1936,7 @@ pause_download(struct download *d, bool pause, bool force)
 		json_write_endarr(jw);
 	}
 
-	do_rpc();
+	do_rpc(rpc);
 }
 
 static void
@@ -1977,13 +1976,13 @@ purge_download_handler(struct json_node const *result, struct download *d)
 static void
 purge_download(struct download *d)
 {
-	struct rpc_request *req = new_rpc();
+	struct rpc_request *rpc;
 
-	if (NULL == req)
+	if (NULL == (rpc = new_rpc()))
 		return;
 
-	req->handler = (rpc_handler)purge_download_handler;
-	req->arg = ref_download(d);
+	rpc->handler = (rpc_handler)purge_download_handler;
+	rpc->arg = ref_download(d);
 
 	json_write_key(jw, "method");
 	json_write_str(jw, NULL != d ? "aria2.removeDownloadResult" : "aria2.purgeDownloadResult");
@@ -2000,7 +1999,7 @@ purge_download(struct download *d)
 
 	json_write_endarr(jw);
 
-	do_rpc();
+	do_rpc(rpc);
 }
 
 static void
@@ -2191,13 +2190,13 @@ download_get_files_handler(struct json_node const *result, struct download *d)
 static void
 fetch_download_files(struct download *d)
 {
-	struct rpc_request *req = new_rpc();
+	struct rpc_request *rpc;
 
-	if (NULL == req)
+	if (NULL == (rpc = new_rpc()))
 		return;
 
-	req->handler = (rpc_handler)download_get_files_handler;
-	req->arg = ref_download(d);
+	rpc->handler = (rpc_handler)download_get_files_handler;
+	rpc->arg = ref_download(d);
 
 	json_write_key(jw, "method");
 	json_write_str(jw, "aria2.getFiles");
@@ -2212,7 +2211,7 @@ fetch_download_files(struct download *d)
 
 	json_write_endarr(jw);
 
-	do_rpc();
+	do_rpc(rpc);
 }
 
 static void
@@ -3177,7 +3176,7 @@ show_options_handler(struct json_node const *result, struct download *d)
 	ssize_t len;
 	char *line;
 	size_t linesiz;
-	struct rpc_request *req;
+	struct rpc_request *rpc;
 	int action;
 	struct stat stbefore, stafter;
 
@@ -3212,12 +3211,11 @@ show_options_handler(struct json_node const *result, struct download *d)
 	if (stafter.st_mtim.tv_sec <= stbefore.st_mtim.tv_sec)
 		goto out_fclose;
 
-	req = new_rpc();
-	if (NULL == req)
+	if (NULL == (rpc = new_rpc()))
 		goto out_fclose;
 
-	req->handler = (rpc_handler)change_option_handler;
-	req->arg = ref_download(d);
+	rpc->handler = (rpc_handler)change_option_handler;
+	rpc->arg = ref_download(d);
 
 	json_write_key(jw, "method");
 	json_write_str(jw, NULL != d ? "aria2.changeOption" : "aria2.changeGlobalOption");
@@ -3254,7 +3252,7 @@ show_options_handler(struct json_node const *result, struct download *d)
 
 	free(line);
 
-	do_rpc();
+	do_rpc(rpc);
 
 out_fclose:
 	fclose(f);
@@ -3268,13 +3266,13 @@ out:
 static void
 fetch_options(struct download *d, bool user)
 {
-	struct rpc_request *req = new_rpc();
+	struct rpc_request *rpc;
 
-	if (NULL == req)
+	if (NULL == (rpc = new_rpc()))
 		return;
 
-	req->handler = (rpc_handler)(user ? show_options_handler : fetch_options_handler);
-	req->arg = ref_download(d);
+	rpc->handler = (rpc_handler)(user ? show_options_handler : fetch_options_handler);
+	rpc->arg = ref_download(d);
 
 	json_write_key(jw, "method");
 	json_write_str(jw, NULL != d ? "aria2.getOption" : "aria2.getGlobalOption");
@@ -3289,7 +3287,7 @@ fetch_options(struct download *d, bool user)
 	}
 	json_write_endarr(jw);
 
-	do_rpc();
+	do_rpc(rpc);
 }
 
 static void
@@ -3350,7 +3348,7 @@ add_downloads_handler(struct json_node const *result, void *arg)
 static void
 add_downloads(char cmd)
 {
-	struct rpc_request *req;
+	struct rpc_request *rpc;
 	FILE *f;
 	char *line;
 	size_t linesiz;
@@ -3375,11 +3373,10 @@ add_downloads(char cmd)
 		f = stdin;
 	}
 
-	req = new_rpc();
-	if (NULL == req)
+	if (NULL == (rpc = new_rpc()))
 		goto out_fclose;
 
-	req->handler = (rpc_handler)add_downloads_handler;
+	rpc->handler = (rpc_handler)add_downloads_handler;
 
 	json_write_key(jw, "method");
 	json_write_str(jw, "system.multicall");
@@ -3519,7 +3516,7 @@ next:
 	json_write_endarr(jw); /* }}} */
 	json_write_endarr(jw);
 
-	do_rpc();
+	do_rpc(rpc);
 
 out_fclose:
 	fclose(f);
@@ -3529,12 +3526,12 @@ static void
 update_all(void)
 {
 	unsigned n;
-	struct rpc_request *req = new_rpc();
+	struct rpc_request *rpc;
 
-	if (NULL == req)
+	if (NULL == (rpc = new_rpc()))
 		return;
 
-	req->handler = update_all_handler;
+	rpc->handler = update_all_handler;
 
 	json_write_key(jw, "method");
 	json_write_str(jw, "system.multicall");
@@ -3632,7 +3629,7 @@ out_of_loop:
 	json_write_endarr(jw); /* }}} */
 	json_write_endarr(jw);
 
-	do_rpc();
+	do_rpc(rpc);
 }
 
 static void
@@ -3655,7 +3652,7 @@ remove_download_handler(struct json_node const *result, struct download *d)
 static void
 remove_download(struct download *d, bool force)
 {
-	struct rpc_request *req;
+	struct rpc_request *rpc;
 
 	if (run_action(d, "D") < 0) {
 		if (DOWNLOAD_ACTIVE == abs(d->status)) {
@@ -3664,11 +3661,11 @@ remove_download(struct download *d, bool force)
 		}
 	}
 
-	if (NULL == (req = new_rpc()))
+	if (NULL == (rpc = new_rpc()))
 		return;
 
-	req->handler = (rpc_handler)remove_download_handler;
-	req->arg = ref_download(d);
+	rpc->handler = (rpc_handler)remove_download_handler;
+	rpc->arg = ref_download(d);
 
 	json_write_key(jw, "method");
 	json_write_str(jw, force ? "aria2.forceRemove" : "aria2.remove");
@@ -3681,7 +3678,7 @@ remove_download(struct download *d, bool force)
 	json_write_str(jw, d->gid);
 	json_write_endarr(jw);
 
-	do_rpc();
+	do_rpc(rpc);
 }
 
 static void
@@ -3992,11 +3989,12 @@ remote_info_handler(struct json_node const *result, void *arg)
 static void
 remote_info(void)
 {
-	struct rpc_request *req;
+	struct rpc_request *rpc;
 
-	if (NULL == (req = new_rpc()))
+	if (NULL == (rpc = new_rpc()))
 		return;
-	req->handler = remote_info_handler;
+
+	rpc->handler = remote_info_handler;
 
 	json_write_key(jw, "method");
 	json_write_str(jw, "system.multicall");
@@ -4029,7 +4027,7 @@ remote_info(void)
 	json_write_endarr(jw);
 	json_write_endarr(jw);
 
-	do_rpc();
+	do_rpc(rpc);
 }
 
 static void
@@ -4063,7 +4061,13 @@ on_ws_close(void)
 	if (act_visual != action.kind)
 		exit(EXIT_FAILURE);
 
-	periodic = NULL;
+	if (try_connect != periodic) {
+		periodic = try_connect;
+		period.tv_sec = 1;
+		period.tv_nsec = 0;
+	} else {
+		period.tv_sec *= 2;
+	}
 
 	clear_rpc_requests();
 

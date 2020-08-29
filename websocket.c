@@ -1,4 +1,4 @@
-/* A minimal WebSocket implementation. */
+#define _GNU_SOURCE
 #include <assert.h>
 #include <endian.h>
 #include <errno.h>
@@ -19,7 +19,7 @@
 #define container_of(ptr, type, member) (type *)((char *)ptr - offsetof(type, member))
 #define array_len(arr) (sizeof(arr) / sizeof *(arr))
 
-static int ws[2] = {-1, -1};
+static int ws = -1;
 
 #define BUFPAD 6
 static uint64_t buflen;
@@ -30,57 +30,26 @@ static char *_buf;
 int
 ws_fileno(void)
 {
-	return ws[0];
+	return ws;
 }
 
-int
+bool
 ws_isalive(void)
 {
-	return 0 <= ws[0];
+	return 0 <= ws;
 }
 
 static void
 ws_close(void)
 {
 	on_ws_close();
-	close(ws[0]), ws[0] = -1;
-	close(ws[1]);
+	close(ws), ws = -1;
 }
 
-static int
-expect_http_upgrade(void)
-{
-	for (;;) {
-		ssize_t res;
-
-		if (0 <= (res = read(ws[0], buf, bufsiz - buflen - 1/*nil*/))) {
-			char *end;
-
-			buflen += (size_t)res;
-
-#define HTTP_SWITCHING_PROTOCOLS "HTTP/1.1 101 "
-			if (sizeof HTTP_SWITCHING_PROTOCOLS - 1 <= buflen) {
-				if (0 != memcmp(buf, HTTP_SWITCHING_PROTOCOLS, sizeof HTTP_SWITCHING_PROTOCOLS - 1))
-					return -1;
-			}
-
-			buf[buflen] = '\0';
-			if (NULL != (end = strstr(buf, "\r\n\r\n"))) {
-				buflen -= ((end + 4) - buf);
-				return 0;
-			}
-		}
-
-	}
-
-}
-
-static int
+static bool
 http_upgrade(char const *host, in_port_t port)
 {
-	size_t len;
-
-	len = (size_t)sprintf(buf,
+	buflen = (size_t)sprintf(buf,
 "GET /jsonrpc HTTP/1.1\r\n"
 "Host:%s:%hu\r\n"
 "Upgrade:websocket\r\n"
@@ -90,19 +59,53 @@ http_upgrade(char const *host, in_port_t port)
 "\r\n",
 		host, port);
 
-	if (write(ws[1], buf, len) < 0)
-		return -1;
+	if (write(ws, buf, buflen) < 0) {
+		error_message = strdup(strerror(errno));
+		return false;
+	}
 
-	return expect_http_upgrade();
+#define HTTP_SWITCHING_PROTOCOLS "HTTP/1.1 101 "
+
+	/* make sure buf always starts with the good prefix */
+	memcpy(buf, HTTP_SWITCHING_PROTOCOLS, sizeof HTTP_SWITCHING_PROTOCOLS - 1);
+	buflen = 0;
+
+	for (;;) {
+		ssize_t res;
+
+		if (0 < (res = read(ws, buf, bufsiz - buflen))) {
+			char *hdrend;
+
+			buflen += (size_t)res;
+
+			if (0 != memcmp(buf, HTTP_SWITCHING_PROTOCOLS, sizeof HTTP_SWITCHING_PROTOCOLS - 1)) {
+				error_message = strdup("WebSocket connection refused");
+				return false;
+			}
+
+			if (NULL != (hdrend = memmem(buf, buflen, "\r\n\r\n", 4))) {
+				size_t const hdrlen = (hdrend + 4) - buf;
+				memmove(buf, buf + hdrlen, (buflen -= hdrlen));
+				return true;
+			}
+		} else if (EINTR == errno) {
+			continue;
+		} else {
+			error_message = strdup(strerror(errno));
+			return false;
+		}
+	}
+
+#undef HTTP_SWITCHING_PROTOCOLS
 }
 
-void
-ws_connect(char const *host, in_port_t port)
+static bool
+connnect_to(char const *host, in_port_t port)
 {
 	struct addrinfo hints;
 	struct addrinfo *addrs, *p;
 	int ret;
-	char portstr[sizeof "65536"];
+	char szport[sizeof "65536"];
 
 	assert("not connected" && !ws_isalive());
 
@@ -112,65 +115,72 @@ ws_connect(char const *host, in_port_t port)
 	hints.ai_protocol = IPPROTO_TCP;
 	hints.ai_flags = 0;
 
-	sprintf(portstr, "%hu", port);
+	sprintf(szport, "%hu", port);
 
-	if ((ret = getaddrinfo(host, portstr, &hints, &addrs))) {
-		free(error_message);
-		if (EAI_SYSTEM != ret)
-			error_message = strdup(gai_strerror(ret));
-		else
-			error_message = strdup(strerror(errno));
-		return;
+	if ((ret = getaddrinfo(host, szport, &hints, &addrs))) {
+		error_message = EAI_SYSTEM == ret
+			? strdup(strerror(errno))
+			: strdup(gai_strerror(ret));
+		return false;
 	}
 
 	for (p = addrs; NULL != p; p = p->ai_next) {
-		ws[0] = socket(p->ai_family,
+		ws = socket(p->ai_family,
 				p->ai_socktype
 #ifdef SOCK_CLOEXEC
 				| SOCK_CLOEXEC
 #endif
 				, p->ai_protocol);
-		if (-1 == ws[0])
+		if (-1 == ws)
 			continue;
 
-		if (0 == connect(ws[0], p->ai_addr, p->ai_addrlen))
+		if (0 == connect(ws, p->ai_addr, p->ai_addrlen))
 			break;
 
-		close(ws[0]), ws[0] = -1;
+		close(ws), ws = -1;
 	}
 
 	freeaddrinfo(addrs);
 
-	if (ws[0] < 0) {
-		free(error_message), error_message = strdup(strerror(errno));
+	if (ws < 0) {
+		error_message = strdup(strerror(errno));
+		return false;
+	}
+
+	return true;
+}
+
+void
+ws_open(char const *host, in_port_t port)
+{
+	free(error_message), error_message = NULL;
+
+	if (!connnect_to(host, port)) {
+		on_ws_close();
 		return;
 	}
 
-	buflen = 0;
 	_buf = realloc(_buf, BUFPAD + (bufsiz = BUFSIZ));
 
-	/* make read non-blocking but write blocking; duplicate fds so we do
-	 * not have to flip O_NONBLOCK on and off before every operation */
-	ws[1] = fcntl(ws[0], F_DUPFD_CLOEXEC, 0);
-	fcntl(ws[0], F_SETFL, O_NONBLOCK | fcntl(ws[0], F_GETFL));
-#ifndef SOCK_CLOEXEC
-	fcntl(ws[0], F_SETFD, O_CLOEXEC | fcntl(ws[0], F_GETFD));
-#endif
-
-	if (http_upgrade(host, port)) {
-		close(ws[0]), ws[0] = -1;
-		close(ws[1]);
-		free(error_message), error_message = strdup("connection refused");
+	if (!http_upgrade(host, port)) {
+		ws_close();
 		return;
 	}
+
+#ifndef SOCK_CLOEXEC
+	fcntl(ws, F_SETFD, O_CLOEXEC | fcntl(ws, F_GETFD));
+#endif
+	fcntl(ws, F_SETFL, O_NONBLOCK | fcntl(ws, F_GETFL));
 
 	on_ws_open();
 }
 
-void
+int
 ws_write(char const *msg, size_t msglen)
 {
 	struct iovec iov[2];
+	/* add 6 pad bytes to the left so we can read all 1, 2 and 8-long
+	 * integers aligned */
 	uint8_t hdr[6 + 2 + 8 + 4] __attribute__((aligned(8)));
 	uint8_t *p = hdr + 6;
 
@@ -200,17 +210,18 @@ ws_write(char const *msg, size_t msglen)
 
 	iov[0].iov_len = p - (hdr + 6);
 
-	while (-1 == writev(ws[1], iov, array_len(iov))) {
-		if (EINTR == errno)
-			continue;
-		ws_close();
-		return;
+	while (-1 == writev(ws, iov, array_len(iov))) {
+		if (EAGAIN != errno)
+			ws_close();
+		return -1;
 	}
+
+	return 0;
 }
 
 /* process all websocket messages (frames) found in buffer */
 static void
-ws_process_frames(void)
+process_frames(void)
 {
 	for (;;) {
 		uint64_t payloadlen, framelen;
@@ -245,8 +256,7 @@ ws_process_frames(void)
 			switch ((uint8_t)buf[0]) {
 			case UINT8_C(0x81): /* fin := 1, rsv{1,2,3} := 0, text frame == 1 */
 				on_ws_message((char *)buf + hdrlen, payloadlen);
-				buflen -= framelen;
-				memmove(buf, buf + framelen, buflen);
+				memmove(buf, buf + framelen, (buflen -= framelen));
 				break;
 
 			default:
@@ -274,9 +284,9 @@ ws_read(void)
 	for (;;) {
 		ssize_t res;
 
-		if (0 < (res = read(ws[0], buf + buflen, bufsiz - buflen))) {
+		if (0 < (res = read(ws, buf + buflen, bufsiz - buflen))) {
 			buflen += (size_t)res;
-			ws_process_frames();
+			process_frames();
 		} else if (EAGAIN == errno) {
 			return;
 		} else {
