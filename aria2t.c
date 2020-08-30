@@ -1711,6 +1711,8 @@ update(void)
 
 				if (-DOWNLOAD_ERROR == d->status)
 					WANT("errorMessage");
+			} else if (DOWNLOAD_UNKNOWN == d->status) {
+					WANT("status");
 			} else if (DOWNLOAD_ACTIVE == d->status) {
 				if (0 < d->download_speed ||
 				    (global.download_speed != global.download_speed_total &&
