@@ -719,7 +719,7 @@ parse_session_info(struct json_node const *result)
 			json_get(result, "sessionId")->val.str);
 }
 
-static void
+static bool
 do_rpc(struct rpc_request *rpc)
 {
 	json_write_endobj(jw);
@@ -727,6 +727,10 @@ do_rpc(struct rpc_request *rpc)
 		set_error_message("write: %s",
 				strerror(errno));
 		free_rpc(rpc);
+
+		return false;
+	} else {
+		return true;
 	}
 }
 
@@ -1583,7 +1587,7 @@ static void
 update_handler(struct json_node const *result, struct update_arg *arg)
 {
 	if (NULL == result)
-		goto free_arg;
+		goto out;
 
 	result = json_children(result);
 	parse_global_stat(result);
@@ -1597,9 +1601,10 @@ update_handler(struct json_node const *result, struct update_arg *arg)
 	}
 
 	refresh();
+
+out:
 	set_periodic_update();
 
-free_arg:
 	free(arg);
 }
 
@@ -1613,6 +1618,10 @@ static void
 update(void)
 {
 	struct rpc_request *rpc;
+
+	/* request update only if it was scheduled */
+	if (update != periodic)
+		return;
 
 	if (NULL == (rpc = new_rpc()))
 		return;
@@ -1813,8 +1822,8 @@ update(void)
 
 	json_write_endarr(jw); /* }}} */
 
-	periodic = NULL;
-	do_rpc(rpc);
+	if (do_rpc(rpc))
+		periodic = NULL;
 }
 
 static void
@@ -3001,7 +3010,8 @@ update_all_handler(struct json_node const *result, void *arg)
 		on_downloads_change(0);
 		refresh();
 
-		/* must update options */
+		/* schedule updates and request one now immediately */
+		set_periodic_update();
 		update();
 	}
 }
