@@ -427,7 +427,7 @@ load_config(void)
 	(remote_host = getenv("ARIA_RPC_HOST")) ||
 	(remote_host = "127.0.0.1");
 
-	(NULL == (str = getenv("ARIA_RPC_PORT")) ||
+	(NULL != (str = getenv("ARIA_RPC_PORT")) &&
 		(errno = 0,
 		 remote_port = strtoul(str, NULL, 10),
 		 0 == errno)) ||
