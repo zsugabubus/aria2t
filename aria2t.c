@@ -593,7 +593,7 @@ notification_handler(char const *method, struct json_node const *event)
 		[K_notification_DownloadStop      ] = DOWNLOAD_PAUSED,
 		[K_notification_DownloadComplete  ] = DOWNLOAD_COMPLETE,
 		[K_notification_DownloadError     ] = DOWNLOAD_ERROR,
-		[K_notification_BtDownloadComplete] = DOWNLOAD_COMPLETE
+		[K_notification_BtDownloadComplete] = DOWNLOAD_ACTIVE
 	};
 
 	if (NULL == (dd = get_download_bygid(gid)))
