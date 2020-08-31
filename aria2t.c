@@ -3015,6 +3015,17 @@ runaction_maychanged(struct download *d)
 	}
 }
 
+/* revive ncurses */
+static void
+begwin(void)
+{
+	/* heh. this shit gets forgotten. */
+	keypad(stdscr, TRUE);
+
+	/* *slap* */
+	refresh();
+}
+
 /* Returns:
  * - <0: action did not run.
  * - =0: action executed and terminated successfully.
@@ -3131,7 +3142,7 @@ fileout(int must_edit)
 	while (-1 == waitpid(pid, &status, 0) && errno == EINTR)
 		;
 
-	refresh();
+	begwin();
 
 	return WIFEXITED(status) && EXIT_SUCCESS == WEXITSTATUS(status)
 		? EXIT_SUCCESS
@@ -4251,9 +4262,12 @@ main(int argc, char *argv[])
 			break;
 
 		case SIGWINCH:
+			/* this is how ncurses reinitializes its window size */
 			endwin();
-			/* first refresh is for updating changed window size */
-			refresh();
+			begwin();
+
+			/* and now we can redraw the whole screen with the
+			 * hopefully updated screen dimensions */
 			draw_all();
 			refresh();
 			break;
