@@ -85,16 +85,16 @@ is treated like it was terminated with success.
 .SH USAGE
 .SS "Keyboard Control"
 .TP
-.BR h
-Select parent.
+.BR k ,\  UP
+Move selection upwards.
 .
 .TP
 .BR j ,\  DOWN
 Move selection downwards.
 .
 .TP
-.BR k ,\  UP
-Move selection upwards.
+.BR h
+Select parent.
 .
 .TP
 .BR l
@@ -109,14 +109,6 @@ Select next sibling.
 Select previous sibling.
 .
 .TP
-.B CTRL-U
-Move selection half-screen up.
-.
-.TP
-.B CTRL-D
-Move selection half-screen down.
-.
-.TP
 .BR g ,\  HOME
 Select first.
 .
@@ -125,12 +117,36 @@ Select first.
 Select last.
 .
 .TP
-.B K
-Move selected download forward in the queue.
+.B Ctrl-U
+Move selection half-screen up.
+.
+.TP
+.B Ctrl-D
+Move selection half-screen down.
+.
+.TP
+.BR Ctrl-B ,\  PGUP
+Move selection one screen up.
+.
+.TP
+.BR Ctrl-F ,\  PGDWN
+Move selection one screen down.
+.
+.TP
+.BR [
+Select first download of the previous status group.
+.
+.TP
+.BR ]
+Select first download of the next status group.
 .
 .TP
 .B J
 Move selected download backward in the queue.
+.
+.TP
+.B K
+Move selected download forward in the queue.
 .
 .TP
 .BR s ,\  S
@@ -170,7 +186,7 @@ Edit the file to change options.
 .
 .TP
 .BR D ,\  DEL
-Remove download unless there is an action for \*(lqD\*(rq.
+If there is an action for \*(lqD\*(rq execute it, otherwise remove a non-active download.
 .
 .TP
 .BR x ,\  X
@@ -206,12 +222,8 @@ Quit program.
 Quit program with failure.
 .
 .TP
-.B CTRL-L
-Reinitialize connection.
-.
-.TP
 .B Q
-Run action \*(lqQ\*(rq then shut down aria2.
+Run action \*(lqQ\*(rq then shut down aria2 if action terminated with success.
 .
 .TP
 .R (other)

@@ -3709,6 +3709,46 @@ select_download(struct download const *d)
 }
 
 static void
+jump_prev_group(void)
+{
+	if (0 < num_downloads) {
+		struct download **dd = &downloads[selidx];
+		struct download **lim = &downloads[0];
+		int8_t status = abs((*dd)->status);
+
+		while (lim <= --dd) {
+			if (status != abs((*dd)->status)) {
+				status = abs((*dd)->status);
+
+				/* go to the first download of the group */
+				while (lim <= --dd && status == abs((*dd)->status))
+					;
+
+				select_download(dd[1]);
+				break;
+			}
+		}
+	}
+}
+
+static void
+jump_next_group(void)
+{
+	if (0 < num_downloads) {
+		struct download **dd = &downloads[selidx];
+		struct download **lim = &downloads[num_downloads];
+		int8_t status = abs((*dd)->status);
+
+		while (++dd < lim) {
+			if (status != abs((*dd)->status)) {
+				select_download(*dd);
+				break;
+			}
+		}
+	}
+}
+
+static void
 read_stdin(void)
 {
 	int ch;
@@ -3778,12 +3818,14 @@ read_stdin(void)
 			break;
 
 		case KEY_NPAGE:
+		case CONTROL('F'):
 			selidx += getmainheight();
 			draw_cursor();
 			refresh();
 			break;
 
 		case KEY_PPAGE:
+		case CONTROL('B'):
 			selidx -= getmainheight();
 			draw_cursor();
 			refresh();
@@ -3846,6 +3888,14 @@ read_stdin(void)
 
 		case 'X':
 			purge_download(NULL);
+			break;
+
+		case '[':
+			jump_prev_group();
+			break;
+
+		case ']':
+			jump_next_group();
 			break;
 
 		case 'q':
