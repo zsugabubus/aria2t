@@ -1221,8 +1221,8 @@ isgid(char const *str)
 	return '\0' == str[16];
 }
 
-/* remove download if none of the selectors matches. return whether |dd| is
- * still valid (not removed). */
+/* decide whether download |d| (:= *|dd|) should be shown. if not, remove |d|
+ * and return false; otherwise return true. */
 static bool
 filter_download(struct download *d, struct download **dd)
 {
@@ -1250,7 +1250,8 @@ filter_download(struct download *d, struct download **dd)
 
 			for (j = 0; j < d->num_files; ++j) {
 				struct file const *f = &d->files[j];
-				if (NULL != f->path && 0 == memcmp(f->path, sel, sellen))
+
+				if (NULL != f->path && 0 == strncmp(f->path, sel, sellen))
 					return true;
 			}
 		}
@@ -2724,10 +2725,10 @@ on_scroll_changed(void)
 static void
 draw_cursor(void)
 {
-	int const h = view == VIEWS[1] ? getmainheight() : 1;
+	int const height = view == VIEWS[1] ? getmainheight() : 1;
 	int const oldtopidx = topidx;
 
-	(void)curs_set(0 < num_downloads);
+	curs_set(0 < num_downloads);
 
 	if (selidx < 0)
 		selidx = 0;
@@ -2742,15 +2743,15 @@ draw_cursor(void)
 	if (selidx < topidx)
 		topidx = selidx;
 
-	if (topidx + h <= selidx)
-		topidx = selidx - (h - 1);
+	if (topidx + height <= selidx)
+		topidx = selidx - (height - 1);
 
-	if ((size_t)(topidx + h) >= num_downloads)
-		topidx = num_downloads > (size_t)h ? num_downloads - (size_t)h : 0;
+	if ((size_t)(topidx + height) >= num_downloads)
+		topidx = num_downloads > (size_t)height ? num_downloads - (size_t)height : 0;
 
 	if (topidx == oldtopidx) {
 		move(view == VIEWS[1] ? selidx - topidx : 0, curx);
-	} else if (oldselidx != selidx) {
+	} else {
 		on_scroll_changed();
 		/* update now seen downloads */
 		update();
