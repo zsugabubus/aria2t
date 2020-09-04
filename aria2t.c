@@ -2184,48 +2184,6 @@ draw_file(struct download const *d, size_t i, int *y)
 	}
 }
 
-
-static void
-download_get_files_handler(struct json_node const *result, struct download *d)
-{
-	if (NULL != result) {
-		if (upgrade_download(d, NULL)) {
-			parse_download_files(d, result);
-			draw_main();
-			refresh();
-		}
-	}
-
-	unref_download(d);
-}
-
-static void
-fetch_download_files(struct download *d)
-{
-	struct rpc_request *rpc;
-
-	if (NULL == (rpc = new_rpc()))
-		return;
-
-	rpc->handler = (rpc_handler)download_get_files_handler;
-	rpc->arg = ref_download(d);
-
-	json_write_key(jw, "method");
-	json_write_str(jw, "aria2.getFiles");
-
-	json_write_key(jw, "params");
-	json_write_beginarr(jw);
-
-	/* “secret” */
-	json_write_str(jw, secret_token);
-	/* “gid” */
-	json_write_str(jw, d->gid);
-
-	json_write_endarr(jw);
-
-	do_rpc(rpc);
-}
-
 static void
 draw_files(void)
 {
@@ -2235,7 +2193,7 @@ draw_files(void)
 
 		draw_download(d, false, &y);
 
-		if (NULL != d->files) {
+		if (0 < d->num_files) {
 			size_t i;
 
 			for (i = 0; i < d->num_files; ++i)
@@ -2244,7 +2202,7 @@ draw_files(void)
 			/* linewrap */
 			move(y, 0);
 		} else {
-			fetch_download_files(d);
+			update();
 		}
 
 	} else {
