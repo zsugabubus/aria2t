@@ -3040,7 +3040,7 @@ run_action(struct download *d, char const *name, ...)
 
 	/* become foreground process */
 	tcsetpgrp(STDERR_FILENO, getpgrp());
-	refresh();
+	begwin();
 
 	update_title();
 
