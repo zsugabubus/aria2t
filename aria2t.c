@@ -2862,7 +2862,6 @@ static void
 draw_all(void)
 {
 	draw_main();
-	draw_cursor();
 }
 
 static void
