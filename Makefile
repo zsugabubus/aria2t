@@ -1,12 +1,17 @@
 #!/usr/bin/make -f
-PREFIX ?= /usr/local
-MANPREFIX ?= /usr/share/man
+TARGET := aria2t
+
+prefix      ?= /usr/local
+exec_prefix ?= $(prefix)
+bindir      ?= $(exec_prefix)/bin
+datarootdir ?= $(prefix)/share
+mandir      ?= $(datarootdir)/man
+man1dir     ?= $(mandir)/man1
 
 INSTALL ?= install
 RM ?= rm -f
 PKGCONFIG ?= pkg-config
 
-TARGET := aria2t
 CFLAGS += -std=c11 -g -O2 -pedantic -Wall -Wextra
 
 PACKAGES := ncursesw
@@ -29,19 +34,19 @@ $(TARGET) : %: keys.in %.c program.? websocket.? b64.? jeezson/jeezson.? fourmat
 	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $(LDLIBS) $@.c program.c websocket.c b64.c jeezson/jeezson.c fourmat/fourmat.c
 
 installdirs :
-	$(INSTALL) -d $(DESTDIR)$(PREFIX)/bin \
-	              $(DESTDIR)$(MANPREFIX)/man1
+	$(INSTALL) -d $(DESTDIR)$(bindir) \
+	              $(DESTDIR)$(man1dir)
 
 install : aria2t installdirs
-	$(INSTALL) $< $(DESTDIR)$(PREFIX)/bin
-	-$(INSTALL) -m 0644 $<.1 $(DESTDIR)$(MANPREFIX)/man1
+	$(INSTALL) $< $(DESTDIR)$(bindir)
+	-$(INSTALL) -m 0644 $<.1 $(DESTDIR)$(man1dir)
 
 install-strip :
 	$(MAKE) INSTALL='$(INSTALL) -s' install
 
 uninstall :
-	$(RM) $(patsubst %,$(DESTDIR)$(PREFIX)/%,$(TARGET)) \
-	      $(patsubst %,$(DESTDIR)$(MANPREFIX)/man1/%.1.gz,$(TARGET))
+	$(RM) $(DESTDIR)$(bindir)/$(TARGET)
+	$(RM) $(DESTDIR)$(man1dir)/$(TARGET).1*
 
 clean :
 	$(RM) keys.in $(TARGET)
