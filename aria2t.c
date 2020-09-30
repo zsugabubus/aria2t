@@ -2839,6 +2839,9 @@ draw_statusline(void)
 	x = w;
 	mvaddstr(y, x -= 1, " ");
 
+	if (0 == global.uploaded_total)
+		goto skip_upload;
+
 	/* upload */
 	if (0 < global.upload_speed_limit) {
 		n = fmt_speed(fmtbuf, global.upload_speed_limit);
@@ -2852,16 +2855,25 @@ draw_statusline(void)
 	n = fmt_speed(fmtbuf, speed);
 	mvaddnstr(y, x -= n, fmtbuf, n);
 
+	attr_set(A_NORMAL, 0, NULL);
 	mvaddstr(y, x -= 4, "] @ ");
+	if (0 < speed)
+		attr_set(A_NORMAL, COLOR_UP, NULL);
 	n = fmt_percent(fmtbuf, global.uploaded_total, global.have_total);
 	mvaddnstr(y, x -= n, fmtbuf, n);
+	attr_set(A_NORMAL, 0, NULL);
 	mvaddstr(y, x -= 1, "[");
 
+	if (0 < speed)
+		attr_set(A_BOLD, COLOR_UP, NULL);
 	n = fmt_space(fmtbuf, global.uploaded_total);
 	mvaddnstr(y, x -= n, fmtbuf, n);
 
+	if (0 < speed)
+		attr_set(A_BOLD, COLOR_UP, NULL);
 	mvaddstr(y, x -= 3, " ↑ ");
 	attr_set(A_NORMAL, 0, NULL);
+skip_upload:
 
 	/* download */
 	if (0 < global.download_speed_limit) {
@@ -2876,11 +2888,16 @@ draw_statusline(void)
 	n = fmt_speed(fmtbuf, speed);
 	mvaddnstr(y, x -= n, fmtbuf, n);
 
+	attr_set(A_NORMAL, 0, NULL);
 	mvaddstr(y, x -= 3, " @ ");
 
+	if (0 < speed)
+		attr_set(A_BOLD, COLOR_DOWN, NULL);
 	n = fmt_space(fmtbuf, global.have_total);
 	mvaddnstr(y, x -= n, fmtbuf, n);
 
+	if (0 < speed)
+		attr_set(A_BOLD, COLOR_DOWN, NULL);
 	mvaddstr(y, x -= 3, " ↓ ");
 	attr_set(A_NORMAL, 0, NULL);
 
