@@ -1,4 +1,5 @@
-#!/bin/sh
+#!/bin/sh -ue
+source=${1?Missing source file}
 export LC_ALL=C
 
 exec >keys.in
@@ -8,7 +9,7 @@ echo '#pragma GCC diagnostic push'
 echo '#pragma GCC diagnostic ignored "-Wmissing-field-initializers"'
 echo '#pragma GCC diagnostic ignored "-Wunused-parameter"'
 
-sed -n '/K_[a-zA-Z_.-]*_parse/{s/.*\(K_[a-zA-Z_.-]*\)_parse.*/\1/p}' aria2t.c |
+sed -n '/K_[a-zA-Z_.-]*_parse/{s/.*\(K_[a-zA-Z_.-]*\)_parse.*/\1/p}' "$source" |
 sort |
 uniq |
 while read -r name
@@ -22,7 +23,7 @@ do
 				t subst_dashes
 				p
 			}
-		}' aria2t.c |
+		}' "$source" |
 		sort |
 		uniq
 	)
@@ -54,4 +55,4 @@ EOF
 done
 
 echo '#pragma GCC diagnostic pop'
-echo '/* vim:set ft=c: */'
+echo '/* vim'':set ft=c: */'

@@ -21,8 +21,8 @@ LDFLAGS += $(shell $(PKGCONFIG) --cflags $(PACKAGES))
 
 all : $(TARGET)
 
-keys.in : aria2t.c genkeys
-	./genkeys
+keys.in : keys.gen aria2t.c
+	./$+
 
 jeezson/% :
 	git submodule update --init jeezson
