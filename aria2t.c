@@ -4297,6 +4297,9 @@ on_ws_open(void)
 
 	is_local = 0;
 	remote_info();
+
+	draw_all();
+	refresh();
 }
 
 void
@@ -4322,6 +4325,9 @@ on_ws_close(void)
 	free(downloads), downloads = NULL;
 
 	cleanup_session_file();
+
+	draw_all();
+	refresh();
 }
 
 static void
