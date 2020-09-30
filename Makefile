@@ -21,7 +21,10 @@ LDFLAGS += $(shell $(PKGCONFIG) --cflags $(PACKAGES))
 
 all : $(TARGET)
 
-keys.in : keys.gen aria2t.c
+keys.in : keys.gen $(TARGET).c
+	./$+
+
+$(TARGET).1 : % : manpage.gen %.in $(TARGET).c
 	./$+
 
 jeezson/% :
@@ -37,7 +40,9 @@ installdirs :
 	$(INSTALL) -d $(DESTDIR)$(bindir) \
 	              $(DESTDIR)$(man1dir)
 
-install : aria2t installdirs
+docs : $(TARGET).1
+
+install : $(TARGET) docs installdirs
 	$(INSTALL) $< $(DESTDIR)$(bindir)
 	-$(INSTALL) -m 0644 $<.1 $(DESTDIR)$(man1dir)
 
@@ -53,4 +58,4 @@ clean :
 	$(MAKE) -C jeezson clean
 	$(MAKE) -C fourmat clean
 
-.PHONY: all clean dist install install-strip installdirs uninstall
+.PHONY: all clean dist docs install install-strip installdirs uninstall

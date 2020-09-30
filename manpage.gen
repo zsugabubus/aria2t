@@ -1,0 +1,30 @@
+#!/bin/sh -e
+MANPAGE_IN=${1?Missing template manual page}
+MANPAGE=${MANPAGE_IN%.in}
+shift
+test ! "$#" = 0 || printf >&2 '%s: warning: no inputs for %s\n' "$0" "$MANPAGE"
+
+exec <"$MANPAGE_IN"
+exec >"$MANPAGE"
+
+IFS=
+
+while read -r line
+do
+	case "$line" in
+	(INCLUDE\(*\))
+		name=${line#INCLUDE(}
+		name=${name%)}
+		sed -n '/\/\*MAN('"$name"')/{n;:o;N;s/\*\/$//;To;s/[\t]* \*  *//g;p}' "$@"
+		;;
+	(SHELL\(*\))
+		git shortlog -sn | cut -f2|sed -e 'i.UR' -e 'a.UE'
+		cmd=${line#SHELL(}
+		cmd=${cmd%)}
+		eval "$cmd"
+		;;
+	(*)
+		printf '%s\n' "$line"
+		;;
+	esac
+done

@@ -220,9 +220,8 @@ static int downloads_need_reflow = 0;
 static int tag_col_width = 0;
 static struct download const *longest_tag;
 static int do_forced = 0;
-static int oldselidx;
-static int selidx = 0;
-static int topidx = 0;
+static int oldselidx, selidx;
+static int oldtopidx, topidx;
 
 static struct json_writer jw[1];
 
@@ -2684,32 +2683,47 @@ static void
 draw_cursor(void)
 {
 	int const height = view == VIEWS[1] ? getmainheight() : 1;
-	int const oldtopidx = topidx;
 
 	curs_set(0 < num_downloads);
+
+	if (topidx < 0)
+		topidx = 0;
+
+	if (num_downloads <= (size_t)(topidx + height))
+		topidx = (size_t)height < num_downloads ? num_downloads - (size_t)height : 0;
 
 	if (selidx < 0)
 		selidx = 0;
 
-	if ((size_t)selidx >= num_downloads)
+	if (num_downloads <= (size_t)selidx)
 		selidx = (int)num_downloads - 1;
 
 	if (selidx < 0)
 		selidx = 0;
 
-	/* scroll selection into view */
-	if (selidx < topidx)
-		topidx = selidx;
+	if (oldtopidx == topidx) {
+		/* selection changed */
+		if (selidx < topidx)
+			topidx = selidx;
 
-	if (topidx + height <= selidx)
-		topidx = selidx - (height - 1);
+		if (topidx + height <= selidx)
+			topidx = selidx - (height - 1);
 
-	if ((size_t)(topidx + height) >= num_downloads)
-		topidx = num_downloads > (size_t)height ? num_downloads - (size_t)height : 0;
+		if (num_downloads <= (size_t)(topidx + height))
+			topidx = (size_t)height < num_downloads ? num_downloads - (size_t)height : 0;
+	} else {
+		/* scroll changed */
+		if (selidx < topidx)
+			selidx = topidx;
 
-	if (topidx == oldtopidx) {
+		if (topidx + height <= selidx)
+			selidx = topidx + (height - 1);
+	}
+
+	if (oldtopidx == topidx) {
 		move(view == VIEWS[1] ? selidx - topidx : 0, curx);
 	} else {
+		oldtopidx = topidx;
 		on_scroll_changed();
 		/* update now seen downloads */
 		update();
@@ -3734,6 +3748,11 @@ read_stdin(void)
 
 	while (ERR != (ch = getch())) {
 		switch (ch) {
+		/*MAN(KEYS)
+		 * .TP
+		 * .BR j ,\  Down
+		 * Move selection downwards.
+		 */
 		case 'j':
 		case KEY_DOWN:
 			++selidx;
@@ -3741,12 +3760,11 @@ read_stdin(void)
 			refresh();
 			break;
 
-		case 'J':
-		case 'K':
-			if (0 < num_downloads)
-				change_download_position(downloads[selidx], ch == 'J' ? 1 : -1, POS_CUR);
-			break;
-
+		/*MAN(KEYS)
+		 * .TP
+		 * .BR k ,\  Up
+		 * Move selection upwards.
+		 */
 		case 'k':
 		case KEY_UP:
 			--selidx;
@@ -3754,62 +3772,51 @@ read_stdin(void)
 			refresh();
 			break;
 
+		/*MAN(KEYS)
+		 * .TP
+		 * .BR h
+		 * Select parent.
+		 */
 		case 'h':
 			if (0 < num_downloads)
 				select_download(downloads[selidx]->parent);
 			break;
 
+		/*MAN(KEYS)
+		 * .TP
+		 * .BR l
+		 * Select first children.
+		 */
 		case 'l':
 			if (0 < num_downloads)
 				select_download(downloads[selidx]->first_child);
 			break;
 
+		/*MAN(KEYS)
+		 * .TP
+		 * .BR n
+		 * Select next sibling.
+		 */
 		case 'n':
 			if (0 < num_downloads)
 				select_download(downloads[selidx]->next_sibling);
 			break;
 
+		/*MAN(KEYS)
+		 * .TP
+		 * .BR N
+		 * Select previous sibling.
+		 */
 		case 'N':
 			if (0 < num_downloads)
 				select_download(download_prev_sibling(downloads[selidx]));
 			break;
 
-		case 'v':
-		case KEY_RIGHT:
-			switch_view(1);
-			break;
-
-		case 'V':
-		case KEY_LEFT:
-			switch_view(0);
-			break;
-
-		case CONTROL('D'):
-			selidx += getmainheight() / 2;
-			draw_cursor();
-			refresh();
-			break;
-
-		case CONTROL('U'):
-			selidx -= getmainheight() / 2;
-			draw_cursor();
-			refresh();
-			break;
-
-		case KEY_NPAGE:
-		case CONTROL('F'):
-			selidx += getmainheight();
-			draw_cursor();
-			refresh();
-			break;
-
-		case KEY_PPAGE:
-		case CONTROL('B'):
-			selidx -= getmainheight();
-			draw_cursor();
-			refresh();
-			break;
-
+		/*MAN(KEYS)
+		 * .TP
+		 * .BR g ,\  Home
+		 * Select first.
+		 */
 		case 'g':
 		case KEY_HOME:
 			selidx = 0;
@@ -3817,6 +3824,11 @@ read_stdin(void)
 			refresh();
 			break;
 
+		/*MAN(KEYS)
+		 * .TP
+		 * .BR G ,\  End
+		 * Select last.
+		 */
 		case 'G':
 		case KEY_END:
 			selidx = INT_MAX;
@@ -3824,30 +3836,199 @@ read_stdin(void)
 			refresh();
 			break;
 
+		/*MAN(KEYS)
+		 * .TP
+		 * .B Ctrl-E
+		 * Scroll small downwards.
+		 */
+		case CONTROL('E'):
+			topidx += 3;
+			draw_cursor();
+			refresh();
+			break;
+
+		/*MAN(KEYS)
+		 * .TP
+		 * .B Ctrl-Y
+		 * Scroll small upwards.
+		 */
+		case CONTROL('Y'):
+			topidx -= 3;
+			draw_cursor();
+			refresh();
+			break;
+
+		/*MAN(KEYS)
+		 * .TP
+		 * .B Ctrl-D
+		 * Scroll half-screen downwards.
+		 */
+		case CONTROL('D'):
+			topidx += getmainheight() / 2;
+			selidx += getmainheight() / 2;
+			draw_cursor();
+			refresh();
+			break;
+
+		/*MAN(KEYS)
+		 * .TP
+		 * .B Ctrl-U
+		 * Scroll half-screen upwards.
+		 */
+		case CONTROL('U'):
+			topidx -= getmainheight() / 2;
+			selidx -= getmainheight() / 2;
+			draw_cursor();
+			refresh();
+			break;
+
+		/*MAN(KEYS)
+		 * .TP
+		 * .BR Ctrl-F ,\  PageDown
+		 * Scroll one screen downwards.
+		 */
+		case KEY_NPAGE:
+		case CONTROL('F'):
+			topidx += getmainheight();
+			selidx += getmainheight();
+			draw_cursor();
+			refresh();
+			break;
+
+		/*MAN(KEYS)
+		 * .TP
+		 * .BR Ctrl-B ,\  PageUp
+		 * Scroll one screen upwards.
+		 */
+		case KEY_PPAGE:
+		case CONTROL('B'):
+			topidx -= getmainheight();
+			selidx -= getmainheight();
+			draw_cursor();
+			refresh();
+			break;
+
+		/*MAN(KEYS)
+		 * .TP
+		 * .BR [
+		 * Select first download of the previous status group.
+		 */
+		case '[':
+			jump_prev_group();
+			break;
+
+		/*MAN(KEYS)
+		 * .TP
+		 * .BR ]
+		 * Select first download of the next status group.
+		 */
+		case ']':
+			jump_next_group();
+			break;
+
+		/*MAN(KEYS)
+		 * .TP
+		 * .B J
+		 * Move selected download backward in the queue.
+		 */
+		case 'J':
+		/*MAN(KEYS)
+		 * .TP
+		 * .B K
+		 * Move selected download forward in the queue.
+		 */
+		case 'K':
+			if (0 < num_downloads)
+				change_download_position(downloads[selidx], ch == 'J' ? 1 : -1, POS_CUR);
+			break;
+
+		/*MAN(KEYS)
+		 * .TP
+		 * .BR s ,\  S
+		 * Start (unpause) selected/all download(s).
+		 * .TP
+		 * .BR p ,\  P
+		 * Pause selected/all download(s).
+		 */
 		case 's':
 		case 'p':
 			if (0 < num_downloads)
 				pause_download(downloads[selidx], ch == 'p', do_forced);
 			do_forced = 0;
 			break;
-
 		case 'S':
 		case 'P':
 			pause_download(NULL, ch == 'P', do_forced);
 			do_forced = 0;
 			break;
 
+		/*MAN(KEYS)
+		 * .TP
+		 * .BR v ,\  RIGHT
+		 * Switch to next view.
+		 */
+		case 'v':
+		case KEY_RIGHT:
+			switch_view(1);
+			break;
+
+		/*MAN(KEYS)
+		 * .TP
+		 * .BR V ,\  LEFT
+		 * Switch to previous view.
+		 */
+		case 'V':
+		case KEY_LEFT:
+			switch_view(0);
+			break;
+
+		/*MAN(KEYS)
+		 * .TP
+		 * .BR a ,\  A ,\  +
+		 * Add download(s) from
+		 * .IR "session file" .
+		 * Open
+		 * .I session file
+		 * for editing unless there are associated actions. Select lastly added download.
+		 * .sp
+		 * For the expected format refer to aria2's
+		 * .IR "Input File" .
+		 * Note that URIs that end with
+		 * .BR .torrent \ and\  .meta4 \ or\  .metalink
+		 * and refer to a readable file on the local filesystem, are got uploaded to
+		 * aria2 as a blob.
+		 * .sp
+		 * Insert downloads after the selection in the queue.
+		 */
 		case 'a':
 		case 'A':
 		case '+':
 			add_downloads(ch);
 			break;
 
+		/*MAN(KEYS)
+		 * .TP
+		 * .BR i ,\  I
+		 * Write selected download/global options in a
+		 * .BR = -separated
+		 * key-value format into the
+		 * .IR "session file" .
+		 * Open
+		 * .I session file
+		 * for viewing unless there are associated actions.
+		 * Edit the file to change options.
+		 */
 		case 'i':
 		case 'I':
 			show_options(0 < num_downloads && ch == 'i' ? downloads[selidx] : NULL);
 			break;
 
+		/*MAN(KEYS)
+		 * .TP
+		 * .BR D ,\  Del
+		 * If there is an action for \*(lqD\*(rq execute it, otherwise
+		 * remove a non-active download.
+		 */
 		case 'D':
 		case KEY_DC: /*delete*/
 			if (0 < num_downloads) {
@@ -3856,27 +4037,24 @@ read_stdin(void)
 			}
 			break;
 
-		case '!':
-			do_forced = 1;
-			break;
-
+		/*MAN(KEYS)
+		 * .TP
+		 * .BR x ,\  X
+		 * Remove download result for selection/all downloads.
+		 */
 		case 'x':
 			if (0 < num_downloads)
 				purge_download(downloads[selidx]);
 			break;
-
 		case 'X':
 			purge_download(NULL);
 			break;
 
-		case '[':
-			jump_prev_group();
-			break;
-
-		case ']':
-			jump_next_group();
-			break;
-
+		/*MAN(KEYS)
+		 * .TP
+		 * .B q
+		 * Go back to default view. On default view quit.
+		 */
 		case 'q':
 		case CONTROL('['):
 			if (view != VIEWS[1]) {
@@ -3886,10 +4064,30 @@ read_stdin(void)
 				refresh();
 				continue;
 			}
-			/* FALLTHROUGH */
+			/* fallthrough */
+		/*MAN(KEYS)
+		 * .TP
+		 * .B Z
+		 * Quit program.
+		 */
 		case 'Z':
 			exit(EXIT_SUCCESS);
 
+		/*MAN(KEYS)
+		 * .TP
+		 * .B !
+		 * Do next command by force. With Torrent downloads, for
+		 * example, it means that it will not contant to tracker(s).
+		 */
+		case '!':
+			do_forced = 1;
+			break;
+
+		/*MAN(KEYS)
+		 * .TP
+		 * .B Return
+		 * If standard output is not connected to a terminal, print selected GID and exit.
+		 */
 		case CONTROL('M'):
 			if (isatty(STDOUT_FILENO)) {
 				goto default_action;
@@ -3905,12 +4103,18 @@ read_stdin(void)
 			}
 			break;
 
+		/*MAN(KEYS)
+		 * .TP
+		 * .B Q
+		 * Run action \*(lqQ\*(rq then shut down aria2 if action terminated with success.
+		 */
 		case 'Q':
 			if (EXIT_FAILURE != run_action(NULL, "Q"))
 				shutdown_aria(do_forced);
 			do_forced = 0;
 			break;
 
+		/* undocumented */
 		case CONTROL('L'):
 			/* try connect if not connected */
 			if (!ws_isalive())
@@ -3920,9 +4124,20 @@ read_stdin(void)
 			update_all();
 			break;
 
+		/*MAN(KEYS)
+		 * .TP
+		 * .B Ctrl-C
+		 * Quit program with failure.
+		 */
 		case CONTROL('C'):
 			exit(EXIT_FAILURE);
 
+		/*MAN(KEYS)
+		 * .TP
+		 * .R (other)
+		 * Run action named like the pressed key. Uses
+		 * .BR keyname (3x).
+		 */
 		default:
 		default_action:
 			run_action(NULL, "%s", keyname(ch));
@@ -4078,6 +4293,7 @@ on_ws_open(void)
 	clear_error_message();
 
 	oldselidx = -1;
+	oldtopidx = -1;
 
 	is_local = 0;
 	remote_info();

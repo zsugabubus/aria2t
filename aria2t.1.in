@@ -84,151 +84,7 @@ is treated like it was terminated with success.
 .
 .SH USAGE
 .SS "Keyboard Control"
-.TP
-.BR k ,\  UP
-Move selection upwards.
-.
-.TP
-.BR j ,\  DOWN
-Move selection downwards.
-.
-.TP
-.BR h
-Select parent.
-.
-.TP
-.BR l
-Select first children.
-.
-.TP
-.BR n
-Select next sibling.
-.
-.TP
-.BR N
-Select previous sibling.
-.
-.TP
-.BR g ,\  HOME
-Select first.
-.
-.TP
-.BR G ,\  END
-Select last.
-.
-.TP
-.B Ctrl-U
-Move selection half-screen up.
-.
-.TP
-.B Ctrl-D
-Move selection half-screen down.
-.
-.TP
-.BR Ctrl-B ,\  PGUP
-Move selection one screen up.
-.
-.TP
-.BR Ctrl-F ,\  PGDWN
-Move selection one screen down.
-.
-.TP
-.BR [
-Select first download of the previous status group.
-.
-.TP
-.BR ]
-Select first download of the next status group.
-.
-.TP
-.B J
-Move selected download backward in the queue.
-.
-.TP
-.B K
-Move selected download forward in the queue.
-.
-.TP
-.BR s ,\  S
-Start (unpause) selected/all download(s).
-.
-.TP
-.BR p ,\  P
-Pause selected/all download(s).
-.
-.TP
-.BR a ,\  A ,\  +
-Add download(s) from
-.IR "session file" .
-Open
-.I session file
-for editing unless there are associated actions. Select lastly added download.
-.sp
-For the expected format refer to aria2's
-.IR "Input File" .
-Note that URIs that end with
-.BR .torrent \ and\  .meta4 \ or\  .metalink
-and refer to a readable file on the local filesystem, are got uploaded to
-aria2 as a blob.
-.sp
-Insert downloads after the selection in the queue.
-.
-.TP
-.BR i ,\  I
-Write selected download/global options in a
-.BR = -separated
-key-value format into the
-.IR "session file" .
-Open
-.I session file
-for viewing unless there are associated actions.
-Edit the file to change options.
-.
-.TP
-.BR D ,\  DEL
-If there is an action for \*(lqD\*(rq execute it, otherwise remove a non-active download.
-.
-.TP
-.BR x ,\  X
-Remove download result for selection/all downloads.
-.
-.TP
-.BR v ,\  RIGHT
-Switch to next view.
-.
-.TP
-.BR V ,\  LEFT
-Switch to previous view.
-.
-.TP
-.B !
-Do next command by force. With Torrent downloads, for example, it means that it
-will not contant to tracker(s).
-.
-.TP
-.B RETURN
-If standard output is not connected to a terminal, print selected GID and exit.
-.
-.TP
-.B q
-Go back to default view. On default view quit.
-.
-.TP
-.B Z
-Quit program.
-.
-.TP
-.B Ctrl-C
-Quit program with failure.
-.
-.TP
-.B Q
-Run action \*(lqQ\*(rq then shut down aria2 if action terminated with success.
-.
-.TP
-.R (other)
-Run action named like the pressed key. Uses
-.BR keyname (3x).
+INCLUDE(KEYS)
 .
 .SS Views
 The following views are available (in this order):
@@ -275,8 +131,7 @@ Default: (empty).
 .B ARIA2T_CONFIG
 Configuration root directory.
 .sp
-Default:
-.IR $HOME/.config/aria2t .
+Default: $HOME/.config/aria2t.
 .
 .TP
 .B VISUAL, EDITOR
@@ -301,8 +156,7 @@ Default:
 Where to create
 .I session file.
 .sp
-Default:
-.IR /tmp .
+Default: /tmp.
 .
 .SH FILES
 .TP
