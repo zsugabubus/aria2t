@@ -37,27 +37,27 @@ interface directly.
 .
 .SH OPTIONS
 .TP
-\-\-force
+.B \-\-force
 Refer to
 .BR ! " key."
 .TP
-\-\-add
+.B \-\-add
 Add URIs from standard input. Same as
 .BR a ,\  A \ and\  + ,
 except it does not invoke any actions.
 .
 .TP
-\-\-shutdown
+.B \-\-shutdown
 Same as
 .BR q ,
 except it does not invoke any actions.
 .
 .TP
-\-\-select { \fIPATH\fR | \fIGID\fR }...
+\fB\-\-select\fR { \fIPATH\fR | \fIGID\fR }...
 Select downloads by their \fIGID\fR or by matching \fIPATH\fR prefix. If omitted, every download is selected.
 .
 .TP
-\-\-print\-*\fR, \fB--pause\fR, \fB--unpause\fR, \fB--purge
+.B \-\-print\-*, --pause, --unpause, --purge
 Take these self-describing actions on
 .BR \-\-select ed
 downloads.
