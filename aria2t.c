@@ -7,6 +7,7 @@
 #include <locale.h>
 #include <ncurses.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,7 +39,7 @@
 #define COLOR_EOF  5
 
 #define CONTROL(letter) ((letter) - '@')
-#define array_len(arr) (sizeof arr / sizeof *arr)
+#define ARRAY_SIZE(x) (sizeof x / sizeof *x)
 
 #define VIEWS "\0dfp"
 
@@ -204,6 +205,7 @@ static char *secret_token;
 static char session_file[PATH_MAX];
 static bool is_local; /* server runs on local host */
 
+struct pollfd pfds[2];
 static struct timespec period;
 static void(*periodic)(void);
 
@@ -660,7 +662,7 @@ new_rpc(void)
 	uint8_t i;
 	struct rpc_request *rpc;
 
-	for (i = 0; i < array_len(rpc_requests); ++i) {
+	for (i = 0; i < ARRAY_SIZE(rpc_requests); ++i) {
 		rpc = &rpc_requests[i];
 
 		if (NULL == rpc->handler)
@@ -690,7 +692,7 @@ found:
 static void
 clear_rpc_requests(void)
 {
-	uint8_t n = array_len(rpc_requests);
+	uint8_t n = ARRAY_SIZE(rpc_requests);
 
 	while (0 < n) {
 		struct rpc_request *rpc = &rpc_requests[--n];
@@ -1859,12 +1861,25 @@ change_download_position(struct download *d, int32_t pos, enum pos_how how)
 }
 
 static void
+shutdown_handler(struct json_node const *result, struct update_arg *arg)
+{
+	(void)arg;
+
+	if (NULL == result)
+		return;
+
+	exit(EXIT_SUCCESS);
+}
+
+static void
 shutdown_aria(int force)
 {
 	struct rpc_request *rpc;
 
 	if (NULL == (rpc = new_rpc()))
 		return;
+
+	rpc->handler = (rpc_handler)shutdown_handler;
 
 	json_write_key(jw, "method");
 	json_write_str(jw, force ? "aria2.forceShutdown" : "aria2.shutdown");
@@ -3680,7 +3695,7 @@ static void
 switch_view(int next)
 {
 	if (!(view = strchr(VIEWS + 1, view)[next ? 1 : -1])) {
-		view = VIEWS[next ? 1 : array_len(VIEWS) - 2];
+		view = VIEWS[next ? 1 : ARRAY_SIZE(VIEWS) - 2];
 		oldselidx = -1; /* force redraw */
 	}
 
@@ -4276,18 +4291,12 @@ remote_info(void)
 	do_rpc(rpc);
 }
 
-static void
-setasync(int fd)
-{
-	fcntl(fd, F_SETFL, O_ASYNC | fcntl(fd, F_GETFL));
-	fcntl(fd, F_SETOWN, getpid());
-	fcntl(fd, F_SETSIG, SIGIO);
-}
-
 void
 on_ws_open(void)
 {
-	setasync(ws_fileno());
+	pfds[1].fd = ws_fileno();
+	pfds[1].events = POLLIN;
+
 	periodic = NULL;
 
 	clear_error_message();
@@ -4305,6 +4314,8 @@ on_ws_open(void)
 void
 on_ws_close(void)
 {
+	pfds[1].fd = -1;
+
 	if (0 == errno)
 		exit(EXIT_SUCCESS);
 
@@ -4343,6 +4354,72 @@ init_action(void)
 	}
 }
 
+static void
+handle_signal_resize(int signum)
+{
+	(void)signum;
+
+	/* this is how ncurses reinitializes its window size */
+	endwin();
+	begwin();
+
+	/* and now we can redraw the whole screen with the
+	 * hopefully updated screen dimensions */
+	draw_all();
+	refresh();
+}
+
+static void
+handle_signal_quit(int signum)
+{
+	(void)signum;
+
+	exit(EXIT_SUCCESS);
+}
+
+static void
+handle_signal_disconnect(int signum)
+{
+	(void)signum;
+
+	ws_close();
+}
+
+static void
+setup_sighandlers(void)
+{
+	struct sigaction sa;
+	sigset_t ss;
+
+	sigemptyset(&ss);
+	sigaddset(&ss, SIGWINCH);
+	sigaddset(&ss, SIGINT);
+	sigaddset(&ss, SIGHUP);
+	sigaddset(&ss, SIGTERM);
+	sigaddset(&ss, SIGKILL);
+	sigaddset(&ss, SIGQUIT);
+	sigaddset(&ss, SIGPIPE);
+
+	sigprocmask(SIG_BLOCK, &ss, NULL);
+
+	/* when process signal handlers block every other signals */
+	sigfillset(&sa.sa_mask);
+	sa.sa_flags = SA_RESTART | SA_NOCLDSTOP | SA_NOCLDWAIT;
+
+	sa.sa_handler = handle_signal_resize;
+	sigaction(SIGWINCH, &sa, NULL);
+
+	sa.sa_handler = handle_signal_quit;
+	sigaction(SIGINT, &sa, NULL);
+	sigaction(SIGHUP, &sa, NULL);
+	sigaction(SIGTERM, &sa, NULL);
+	sigaction(SIGKILL, &sa, NULL);
+	sigaction(SIGQUIT, &sa, NULL);
+
+	sa.sa_handler = handle_signal_disconnect;
+	sigaction(SIGPIPE, &sa, NULL);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -4350,6 +4427,9 @@ main(int argc, char *argv[])
 	int argi;
 
 	setlocale(LC_ALL, "");
+
+	setup_sighandlers();
+	sigemptyset(&ss);
 
 	for (argi = 1; argi < argc;) {
 		char *arg = argv[argi++];
@@ -4387,23 +4467,12 @@ main(int argc, char *argv[])
 
 	json_writer_init(jw);
 
-	atexit(clear_downloads);
+	/* atexit(clear_downloads); */
 	atexit(cleanup_session_file);
 
-	sigemptyset(&ss);
-	sigaddset(&ss, SIGIO);
-	sigaddset(&ss, SIGWINCH);
-	sigaddset(&ss, SIGINT);
-	sigaddset(&ss, SIGHUP);
-	sigaddset(&ss, SIGTERM);
-	sigaddset(&ss, SIGKILL);
-	sigaddset(&ss, SIGQUIT);
-	sigaddset(&ss, SIGPIPE);
-
-	sigprocmask(SIG_BLOCK, &ss, NULL);
-
 	if (act_visual == action.kind) {
-		setasync(STDIN_FILENO);
+		pfds[0].fd = STDIN_FILENO;
+		pfds[0].events = POLLIN;
 
 		atexit(_endwin);
 		newterm(NULL, stderr, stdin);
@@ -4427,51 +4496,27 @@ main(int argc, char *argv[])
 
 		draw_all();
 		refresh();
+	} else {
+		pfds[0].fd = -1;
 	}
 
 	try_connect();
 
 	for (;;) {
-		siginfo_t si;
-		int signum;
-
-		signum = NULL != periodic
-			? sigtimedwait(&ss, &si, &period)
-			: sigwaitinfo(&ss, &si);
-
-		switch (signum) {
-		case -1:
+		switch (ppoll(pfds, ARRAY_SIZE(pfds), NULL != periodic ? &period : NULL, &ss)) {
+		case 0:
 			periodic();
 			break;
 
-		case SIGIO:
-			if (STDIN_FILENO == si.si_fd)
+		case -1:
+			break;
+
+		default:
+			if (pfds[0].revents)
 				read_stdin();
-			else
+
+			if (pfds[1].revents)
 				ws_read();
-			break;
-
-		case SIGWINCH:
-			/* this is how ncurses reinitializes its window size */
-			endwin();
-			begwin();
-
-			/* and now we can redraw the whole screen with the
-			 * hopefully updated screen dimensions */
-			draw_all();
-			refresh();
-			break;
-
-		case SIGINT:
-		case SIGHUP:
-		case SIGTERM:
-		case SIGKILL:
-		case SIGQUIT:
-			exit(EXIT_SUCCESS);
-			break;
-
-		case SIGPIPE:
-			/* ignore */
 			break;
 		}
 	}

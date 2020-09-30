@@ -39,7 +39,7 @@ ws_isalive(void)
 	return 0 <= ws;
 }
 
-static void
+void
 ws_close(void)
 {
 	close(ws), ws = -1;

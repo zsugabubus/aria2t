@@ -5,6 +5,7 @@
 #include <stdbool.h>
 
 void ws_open(char const *host, in_port_t port);
+void ws_close(void);
 int ws_fileno(void);
 bool ws_isalive(void);
 void ws_read(void);
