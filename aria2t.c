@@ -2793,7 +2793,7 @@ draw_statusline(void)
 	if (!first)
 		addstr(")");
 
-	printw(" @ %s:%d%s",
+	printw(" @ %s:%u%s",
 			remote_host, remote_port,
 			ws_isalive() ? "" : " (not connected)");
 
