@@ -42,8 +42,8 @@ ws_isalive(void)
 static void
 ws_close(void)
 {
-	on_ws_close();
 	close(ws), ws = -1;
+	on_ws_close();
 }
 
 static bool
