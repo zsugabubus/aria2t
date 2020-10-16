@@ -3681,11 +3681,12 @@ remove_download(struct download *d, bool force)
 {
 	struct rpc_request *rpc;
 
-	if (run_action(d, "D") < 0) {
-		if (DOWNLOAD_ACTIVE == abs(d->status)) {
-			set_error_message("refusing to delete active download");
-			return;
-		}
+	if (0 <= run_action(d, "D"))
+		return;
+
+	if (DOWNLOAD_ACTIVE == abs(d->status)) {
+		set_error_message("refusing to delete active download");
+		return;
 	}
 
 	if (NULL == (rpc = new_rpc()))
