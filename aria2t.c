@@ -1659,7 +1659,7 @@ update(void)
 		uint8_t topstatus, botstatus, status;
 		size_t arglen = 0;
 
-		if (view == VIEWS[1]) {
+		if (VIEWS[1] == view) {
 			top = &downloads[topidx];
 			bot = top + getmainheight() - 1;
 			if (end <= bot)
@@ -2372,7 +2372,7 @@ draw_download(struct download const *d, bool draw_parents, int *y)
 
 		addstr("* ");
 		attr_set(A_BOLD, COLOR_ERR, NULL);
-		printw("%-*.*s", usable_width, usable_width, NULL != d->error_message && (strlen(d->error_message) <= 30 || view == VIEWS[1]) ? d->error_message : "");
+		printw("%-*.*s", usable_width, usable_width, NULL != d->error_message && (strlen(d->error_message) <= 30 || VIEWS[1] == view) ? d->error_message : "");
 		attr_set(A_NORMAL, 0, NULL);
 
 		if (NULL == d->tags)
@@ -2697,7 +2697,7 @@ on_scroll_changed(void)
 static void
 draw_cursor(void)
 {
-	int const height = view == VIEWS[1] ? getmainheight() : 1;
+	int const height = VIEWS[1] == view ? getmainheight() : 1;
 
 	curs_set(0 < num_downloads);
 
@@ -2736,7 +2736,7 @@ draw_cursor(void)
 	}
 
 	if (oldtopidx == topidx) {
-		move(view == VIEWS[1] ? selidx - topidx : 0, curx);
+		move(VIEWS[1] == view ? selidx - topidx : 0, curx);
 	} else {
 		oldtopidx = topidx;
 		on_scroll_changed();
@@ -3778,6 +3778,10 @@ static void
 read_stdin(void)
 {
 	int ch;
+	MEVENT event;
+
+	mousemask(ALL_MOUSE_EVENTS, NULL);
+	mouseinterval(0);
 
 	while (ERR != (ch = getch())) {
 		switch (ch) {
@@ -4164,6 +4168,26 @@ read_stdin(void)
 		 */
 		case CONTROL('C'):
 			exit(EXIT_FAILURE);
+
+		case KEY_MOUSE:
+			if (getmouse(&event) != OK)
+				break;
+
+#ifdef BUTTON5_PRESSED
+			if (event.bstate & BUTTON4_PRESSED)
+				selidx -= VIEWS[1] == view ? 5 : 1;
+			else if (event.bstate & BUTTON5_PRESSED)
+				selidx += VIEWS[1] == view ? 5 : 1;
+			else
+#endif
+			if (((BUTTON1_PRESSED | BUTTON3_PRESSED) & event.bstate) &&
+			    VIEWS[1] == view &&
+			    event.y < getmainheight())
+				selidx = topidx + event.y;
+
+			draw_cursor();
+			refresh();
+			break;
 
 		/*MAN(KEYS)
 		 * .TP
