@@ -2293,6 +2293,13 @@ downloadcmp(struct download const **pthis, struct download const **pother, void 
 		return this->queue_index - other->queue_index;
 	}
 
+	if (DOWNLOAD_ACTIVE == this_status) {
+		/* prefer not stalled downloads */
+		cmp = (0 < other->download_speed) - (0 < this->download_speed);
+		if (cmp)
+			return cmp;
+	}
+
 	/* prefer incomplete downloads */
 	cmp = (other->have != other->total) -
 	      (this->have != this->total);
