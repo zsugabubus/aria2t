@@ -3331,7 +3331,7 @@ add_downloads_handler(struct json_node const *result, void *arg)
 
 	(void)arg;
 
-	if (json_isempty(result))
+	if (!result || json_isempty(result))
 		return;
 
 	result = json_children(result);
