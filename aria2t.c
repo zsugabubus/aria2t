@@ -57,7 +57,8 @@
 /* str := "true" | "false" */
 #define IS_TRUE(str) ('t' == str[0])
 
-enum pos_how { POS_SET, POS_CUR, POS_END };
+#define PEER_ADDRESS_WIDTH (int)(2 + sizeof(((struct peer *)0)->ip) + 1 + 5)
+#define PEER_INFO_WIDTH 24
 
 struct peer {
 	uint8_t peer_id[20];
@@ -75,6 +76,8 @@ struct peer {
 
 	uint64_t download_speed; /* from peer */
 	uint64_t upload_speed; /* to peer */
+
+	uint8_t *progress;
 };
 
 struct server {
@@ -145,6 +148,7 @@ struct download {
 	bool follows; /* follows or belongsTo |parent| */
 	struct peer *peers;
 	struct file *files;
+	uint8_t *progress;
 
 	struct download *parent;
 	struct download *first_child;
@@ -218,7 +222,7 @@ static struct rpc_request {
 static char view = VIEWS[1];
 
 static int curx = 0;
-static int downloads_need_reflow = 0;
+static bool downloads_need_reflow;
 static int tag_col_width = 0;
 static struct download const *longest_tag;
 static int do_forced = 0;
@@ -237,6 +241,7 @@ static void draw_download(struct download const *d, bool draw_parents, int *y);
 static void
 free_peer(struct peer *p)
 {
+	free(p->progress);
 	(void)p;
 }
 
@@ -335,6 +340,7 @@ free_download(struct download *d)
 	free(d->dir);
 	free(d->name);
 	free(d->error_message);
+	free(d->progress);
 	free(d->tags);
 	free(d);
 }
@@ -350,11 +356,12 @@ ref_download(struct download *d)
 static void
 unref_download(struct download *d)
 {
-	if (NULL != d) {
-		assert(d->refcnt >= 1);
-		if (0 == --d->refcnt)
-			free_download(d);
-	}
+	if (NULL == d)
+		return;
+
+	assert(d->refcnt >= 1);
+	if (0 == --d->refcnt)
+		free_download(d);
 }
 
 static void
@@ -374,7 +381,8 @@ delete_download_at(struct download **dd)
 
 	for (sibling = d->first_child;
 	     NULL != sibling;
-	     sibling = next) {
+	     sibling = next)
+	{
 		next = sibling->next_sibling;
 		sibling->parent = NULL;
 		sibling->next_sibling = NULL;
@@ -866,7 +874,92 @@ parse_peer_id(struct peer *p, char *peer_id)
 }
 
 static void
-parse_peer_bitfield(struct peer *p, char *bitfield)
+draw_progress(struct download const *d, uint8_t const *progress, uint64_t offset, uint64_t end_offset)
+{
+	static char const *const BLOCK_SYMBOLS[] = {
+		" ",
+		"\xe2\x96\x8c", /* left half block */
+		"\xe2\x96\x90", /* right half block */
+		"\xe2\x96\x88", /* full block */
+		"\xe2\x96\x91" /* light shade */
+	};
+
+	int i;
+	int const width = getmaxx(stdscr) - getcurx(stdscr) - 3;
+	uint64_t const piece_offset = offset / d->piece_size;
+	uint64_t const piece_count = (end_offset - offset + d->piece_size) / d->piece_size;
+
+	if (!progress) {
+		clrtoeol();
+		return;
+	}
+
+	addstr(" [");
+	for (i = 0; i < width; ++i) {
+		size_t piece_index;
+		size_t const piece_index_from = piece_offset + piece_count * i / width;
+		size_t piece_index_to = piece_offset + piece_count * (i + 1) / width;
+		size_t const piece_index_half = (piece_index_from + piece_index_to) / 2;
+
+		unsigned mask = 3;
+		unsigned has_some = 0;
+
+		if (d->num_pieces < piece_index_to)
+			piece_index_to = d->num_pieces;
+
+		for (piece_index = piece_index_from;
+		     piece_index < piece_index_to;
+		     ++piece_index)
+		{
+			int const has_piece = (progress[piece_index / CHAR_BIT] >> (CHAR_BIT - 1 - piece_index % CHAR_BIT)) & 1;
+
+			has_some |= has_piece;
+			if (has_piece)
+				continue;
+
+			if (piece_index < piece_index_half) {
+				mask &= ~1;
+				piece_index = piece_index_half;
+			} else {
+				mask &= ~2;
+				break;
+			}
+		}
+
+		addstr(BLOCK_SYMBOLS[0 == mask && has_some ? 4 : mask]);
+	}
+	addstr("]");
+}
+
+static void
+parse_progress(struct download *d, uint8_t **progress, char const *bitfield)
+{
+	uint8_t *p;
+
+#define PARSE_HEX(hex) ((hex) <= '9' ? (hex) - '0' : (hex) - 'a' + 10)
+	free(*progress);
+
+	/* number of pieces is unknown so we ignore bitfield */
+	if (0 == d->num_pieces) {
+		*progress = NULL;
+		return;
+	}
+
+	if (!(p = *progress = malloc((d->num_pieces + CHAR_BIT * 2 - 1) / CHAR_BIT)))
+		return;
+
+	/* we may read junk but who cares */
+	for (;; bitfield += 2) {
+		*p++ = (PARSE_HEX(bitfield[1])) | (PARSE_HEX(bitfield[0]) << 4);
+		if (!(bitfield[0] && bitfield[1]))
+			break;
+	}
+
+#undef PARSE_HEX
+}
+
+static void
+parse_peer_bitfield(struct peer *p, char const *bitfield)
 {
 	static uint8_t const HEX_POPCOUNT[] = {
 		0, 1, 1, 2, 1, 2, 2, 3,
@@ -874,7 +967,7 @@ parse_peer_bitfield(struct peer *p, char *bitfield)
 	};
 
 	uint32_t pieces_have = 0;
-	char *hex;
+	char const *hex;
 
 	for (hex = bitfield; '\0' != *hex; ++hex)
 		pieces_have += HEX_POPCOUNT[*hex <= '9' ? *hex - '0' : *hex - 'a' + 10];
@@ -883,9 +976,11 @@ parse_peer_bitfield(struct peer *p, char *bitfield)
 }
 
 static void
-parse_peer(struct peer *p, struct json_node const *node)
+parse_peer(struct download *d, struct peer *p, struct json_node const *node)
 {
 	struct json_node const *field = json_children(node);
+
+	p->progress = NULL;
 
 	do {
 		switch (K_peer_parse(field->key)) {
@@ -907,6 +1002,7 @@ parse_peer(struct peer *p, struct json_node const *node)
 
 		case K_peer_bitfield:
 			parse_peer_bitfield(p, field->val.str);
+			parse_progress(d, &p->progress, field->val.str);
 			break;
 
 		case K_peer_amChoking:
@@ -961,7 +1057,7 @@ parse_peers(struct download *d, struct json_node const *node)
 		struct peer *oldp;
 		uint32_t j;
 
-		parse_peer(p, node);
+		parse_peer(d, p, node);
 
 		/* find new peer among previous ones to being able to compute
 		 * its progress/speed change */
@@ -1133,33 +1229,33 @@ parse_download_files(struct download *d, struct json_node const *node)
 		file.uris = NULL;
 
 		do {
-			switch (K_files_parse(field->key)) {
-			case K_files_none:
+			switch (K_file_parse(field->key)) {
+			case K_file_none:
 				/* ignore */
 				break;
 
-			case K_files_index:
+			case K_file_index:
 				index = atoi(field->val.str) - 1;
 				break;
 
-			case K_files_path:
+			case K_file_path:
 				file.path = strlen(field->val.str) > 0 ? strdup(field->val.str) : NULL;
 				break;
 
-			case K_files_length:
+			case K_file_length:
 				file.total = strtoull(field->val.str, NULL, 10);
 				break;
 
-			case K_files_completedLength:
+			case K_file_completedLength:
 				file.have = strtoull(field->val.str, NULL, 10);
 				break;
 
-			case K_files_selected:
+			case K_file_selected:
 				file.selected = IS_TRUE(field->val.str);
 				d->num_selfiles += file.selected;
 				break;
 
-			case K_files_uris: {
+			case K_file_uris: {
 				struct json_node const *uris;
 				uint32_t uriidx = 0;
 
@@ -1297,6 +1393,10 @@ parse_download(struct download *d, struct json_node const *node)
 
 		case K_download_pieceLength:
 			d->piece_size = strtoul(field->val.str, NULL, 10);
+			break;
+
+		case K_download_bitfield:
+			parse_progress(d, &d->progress, field->val.str);
 			break;
 
 		case K_download_bittorrent: {
@@ -1709,8 +1809,14 @@ update(void)
 				d->initialized = true;
 			} else {
 				if ((0 == d->num_files && (NULL == d->name || (visible && DOWNLOAD_ACTIVE != d->status && is_local))) ||
-				    view == 'f')
+				    (visible && 'f' == view))
+				{
 					WANT("files");
+					if (is_local)
+						WANT("bitfield");
+				} else if (visible && 'p' == view && is_local) {
+					WANT("bitfield");
+				}
 			}
 
 			if (d->status < 0) {
@@ -1719,19 +1825,22 @@ update(void)
 				WANT("downloadSpeed");
 				WANT("uploadLength");
 				WANT("uploadSpeed");
+				if (is_local)
+					WANT("bitfield");
 
 				if (-DOWNLOAD_ERROR == d->status)
 					WANT("errorMessage");
 			} else if (DOWNLOAD_UNKNOWN == d->status) {
-					WANT("status");
+				WANT("status");
 			} else if (DOWNLOAD_ACTIVE == d->status) {
 				if (0 < d->download_speed ||
 				    (global.download_speed != global.download_speed_total &&
 				     d->have != d->total))
 					WANT("downloadSpeed");
 
-				if (0 < d->download_speed)
+				if (0 < d->download_speed) {
 					WANT("completedLength");
+				}
 
 				if (0 < d->upload_speed ||
 				    global.upload_speed != global.upload_speed_total)
@@ -1829,15 +1938,10 @@ update(void)
 }
 
 static void
-change_download_position(struct download *d, int32_t pos, enum pos_how how)
+change_download_position(struct download *d, int32_t pos, int whence)
 {
-	static char const *const POS_HOW[] = {
-		"POS_SET",
-		"POS_CUR",
-		"POS_END"
-	};
-
 	struct rpc_request *rpc;
+	char *how;
 
 	if (NULL == (rpc = new_rpc()))
 		return;
@@ -1854,7 +1958,24 @@ change_download_position(struct download *d, int32_t pos, enum pos_how how)
 	/* “pos” */
 	json_write_int(jw, pos);
 	/* “how” */
-	json_write_str(jw, POS_HOW[how]);
+	switch (whence) {
+	case SEEK_SET:
+		how = "POS_SET";
+		break;
+
+	case SEEK_CUR:
+		how = "POS_CUR";
+		break;
+
+	case SEEK_END:
+		how = "POS_END";
+		break;
+
+	default:
+		abort();
+	};
+	json_write_str(jw, how);
+
 	json_write_endarr(jw);
 
 	do_rpc(rpc);
@@ -2060,8 +2181,8 @@ draw_peer(struct download const *d, size_t i, int *y)
 	mvprintw(*y, 0, "  %s:%-5u", p->ip, p->port);
 	clrtoeol();
 
-	x = 2 + sizeof p->ip + 1 + 5;
-	move(*y, x + 25 <= w ? x : w - 25);
+	x = PEER_ADDRESS_WIDTH;
+	move(*y, x + PEER_INFO_WIDTH <= w ? x : w - PEER_INFO_WIDTH);
 
 	addstr(" ");
 	n = fmt_percent(fmtbuf, p->pieces_have, d->num_pieces);
@@ -2099,6 +2220,8 @@ draw_peer(struct download const *d, size_t i, int *y)
 		addspaces(4);
 	}
 
+	draw_progress(d, p->progress, 0, d->total);
+
 	++*y;
 }
 
@@ -2110,6 +2233,11 @@ draw_peers(void)
 		int y = 0;
 
 		draw_download(d, false, &y);
+
+		if (d->progress) {
+			mvprintw(y++, 0, "%*.s", PEER_ADDRESS_WIDTH + PEER_INFO_WIDTH, "");
+			draw_progress(d, d->progress, 0, d->total);
+		}
 
 		if (NULL != d->peers) {
 			size_t i;
@@ -2129,7 +2257,7 @@ draw_peers(void)
 }
 
 static void
-draw_file(struct download const *d, size_t i, int *y)
+draw_file(struct download const *d, size_t i, int *y, uint64_t offset)
 {
 	struct file const *f = &d->files[i];
 	char szhave[6];
@@ -2162,6 +2290,11 @@ draw_file(struct download const *d, size_t i, int *y)
 
 	printw("] %s", f->path ? f->path : f->selected ? "(not downloaded yet)" : "(none)");
 	clrtoeol();
+
+	if (f->total != f->have && 0 < f->have && d->progress) {
+		mvprintw((*y)++, 0, "%*.s", 6, "");
+		draw_progress(d, d->progress, offset, offset + f->total);
+	}
 
 	for (j = 0; j < f->num_uris; ++j) {
 		struct uri const *u = &f->uris[j];
@@ -2209,9 +2342,12 @@ draw_files(void)
 
 		if (0 < d->num_files) {
 			size_t i;
+			uint64_t offset = 0;
 
-			for (i = 0; i < d->num_files; ++i)
-				draw_file(d, i, &y);
+			for (i = 0; i < d->num_files; ++i) {
+				draw_file(d, i, &y, offset);
+				offset += d->files[i].total;
+			}
 
 			/* linewrap */
 			move(y, 0);
@@ -2324,6 +2460,7 @@ downloadcmp(struct download const **pthis, struct download const **pother, void 
 			return this->upload_speed > other->upload_speed ? -1 : 1;
 	}
 
+#if 0
 	/* prefer better upload ratio */
 	x = this->total > 0
 		? this->uploaded * 10000 / this->total
@@ -2336,6 +2473,7 @@ downloadcmp(struct download const **pthis, struct download const **pother, void 
 
 	if (this->uploaded != other->uploaded)
 		return this->uploaded > other->uploaded ? -1 : 1;
+#endif
 
 	/* sort by name */
 	return strcoll(this->display_name, other->display_name);
@@ -2599,7 +2737,7 @@ draw_download(struct download const *d, bool draw_parents, int *y)
 		if (tag_col_width < tagwidth) {
 			longest_tag = d; /*no ref*/
 			tag_col_width = tagwidth;
-			downloads_need_reflow = 1;
+			downloads_need_reflow = true;
 		}
 	} else {
 		tagwidth = 0;
@@ -2652,7 +2790,7 @@ draw_downloads(void)
 	int line, height = getmainheight();
 
 	do {
-		downloads_need_reflow = 0;
+		downloads_need_reflow = false;
 		assert(0 <= topidx);
 		for (line = 0; line < height;) {
 			if ((size_t)(topidx + line) < num_downloads) {
@@ -2680,8 +2818,9 @@ on_downloads_change(int stickycurs)
 		if (selidx < 0)
 			selidx = 0;
 
-		if ((size_t)selidx >= num_downloads)
+		if (num_downloads <= (size_t)selidx)
 			selidx = num_downloads - 1;
+
 		memcpy(selgid, downloads[selidx]->gid, sizeof selgid);
 
 		qsort_r(downloads, num_downloads, sizeof *downloads, (int(*)(void const *, void const *, void*))downloadcmp, NULL);
@@ -3983,7 +4122,7 @@ read_stdin(void)
 		 */
 		case 'K':
 			if (0 < num_downloads)
-				change_download_position(downloads[selidx], ch == 'J' ? 1 : -1, POS_CUR);
+				change_download_position(downloads[selidx], ch == 'J' ? 1 : -1, SEEK_CUR);
 			break;
 
 		/*MAN(KEYS)
@@ -4353,7 +4492,7 @@ on_ws_open(void)
 	oldselidx = -1;
 	oldtopidx = -1;
 
-	is_local = 0;
+	is_local = false;
 	remote_info();
 
 	draw_all();
