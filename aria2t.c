@@ -2292,7 +2292,7 @@ draw_file(struct download const *d, size_t i, int *y, uint64_t offset)
 	clrtoeol();
 
 	if (f->total != f->have && 0 < f->have && d->progress) {
-		mvprintw((*y)++, 0, "%*.s", 6, "");
+		mvprintw((*y)++, 0, "%*.s", 8, "");
 		draw_progress(d, d->progress, offset, offset + f->total);
 	}
 
