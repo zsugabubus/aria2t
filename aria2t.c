@@ -4700,7 +4700,10 @@ main(int argc, char *argv[])
 			break;
 
 		default:
-			if (pfds[0].revents)
+			/* terminal gone */
+			if (~POLLIN & pfds[0].revents)
+				exit(EXIT_SUCCESS);
+			else if (POLLIN & pfds[0].revents)
 				read_stdin();
 
 			if (pfds[1].revents)
