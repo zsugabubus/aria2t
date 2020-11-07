@@ -861,56 +861,102 @@ parse_peer_id(struct peer *p, char *peer_id)
 static void
 draw_progress(struct download const *d, uint8_t const *progress, uint64_t offset, uint64_t end_offset)
 {
-	static char const *const BLOCK_SYMBOLS[] = {
-		" ",
-		"\xe2\x96\x8c", /* left half block */
-		"\xe2\x96\x90", /* right half block */
-		"\xe2\x96\x88", /* full block */
-		"\xe2\x96\x91" /* light shade */
+	uint8_t const
+	SYMBOL_MAP[UINT8_MAX + 1] =
+	{
+#define POPCNT8(x) (((((x) * 0x0002000400080010ULL) & 0x1111111111111111ULL) * 0x1111111111111111ULL) >> 60)
+#define B(x) (1 << x)|
+#define S1(x) ((B(1)B(2)B(3)0 >> POPCNT8(x)) & 1 ? 10 + 0 : (B(7)0 >> POPCNT8(x)) & 1 ? 10 + 2 : 10 + 1),
+#define S2(x)   S1(x)   S1(x + 1)
+#define S4(x)   S2(x)   S2(x + 2)
+#define S8(x)   S4(x)   S4(x + 4)
+#define S16(x)  S8(x)   S8(x + 8)
+#define S32(x)  S16(x)  S16(x + 8)
+#define S64(x)  S32(x)  S32(x + 8)
+#define S128(x) S64(x)  S64(x + 64)
+#define S256(x) S128(x) S128(x + 128)
+
+		S256(0)
+
+		[0x00U] = 0,
+		[0x01U] = 1,
+		[0x03U] = 2,
+		[0x07U] = 3,
+		[0x0fU] = 4,
+		[0x1fU] = 5,
+		[0x3fU] = 6,
+		[0x7fU] = 7,
+		[0xffU] = 8,
+		[0xf0U] = 9,
+#undef B
+#undef S1
+#undef S2
+#undef S4
+#undef S8
+#undef S16
+#undef S32
+#undef S64
+#undef S128
+#undef S256
+#undef POPCNT8
 	};
 
-	if (!progress) {
+	static char const
+	SYMBOLS[][4] = {
+		" \0:)",          /* empty */
+		"\xe2\x96\x8f\0", /* left 1/8 */
+		"\xe2\x96\x8e\0", /* left 2/8 */
+		"\xe2\x96\x8d\0", /* left 3/8 */
+		"\xe2\x96\x8c\0", /* left 4/8 */
+		"\xe2\x96\x8b\0", /* left 5/8 */
+		"\xe2\x96\x8a\0", /* left 6/8 */
+		"\xe2\x96\x89\0", /* left 7/8 */
+		"\xe2\x96\x88\0", /* left 8/8 */
+		"\xe2\x96\x90\0", /* right half */
+		"\xe2\x96\x91\0", /* light shade */
+		"\xe2\x96\x92\0", /* medium shade */
+		"\xe2\x96\x93\0", /* dark shade */
+	};
+
+	if (!progress || end_offset <= offset) {
 		clrtoeol();
 		return;
 	}
 
-	int const width = getmaxx(stdscr) - getcurx(stdscr) - 3;
-	uint64_t const piece_offset = offset / d->piece_size;
-	uint64_t const piece_count = (end_offset - offset + d->piece_size) / d->piece_size;
+	int const width = COLS - getcurx(stdscr) - 3;
+	uint32_t const piece_offset = offset / d->piece_size;
+	uint32_t const end_piece_offset = (end_offset + (d->piece_size - 1)) / d->piece_size;
+	uint32_t const piece_count = end_piece_offset - piece_offset;
 
 	addstr(" [");
-	for (int i = 0; i < width; ++i) {
-		size_t piece_index;
-		size_t const piece_index_from = piece_offset + piece_count * i / width;
-		size_t piece_index_to = piece_offset + piece_count * (i + 1) / width;
-		size_t const piece_index_half = (piece_index_from + piece_index_to) / 2;
+	size_t piece_index_from = piece_offset, piece_index_to;
+	int count = 0;
+	for (int i = 0; i < width; piece_index_from = piece_index_to) {
+		piece_index_to = piece_offset + piece_count * ++i / width;
+
+		++count;
+		if (piece_index_from == piece_index_to)
+			continue;
 
 		if (d->num_pieces < piece_index_to)
 			piece_index_to = d->num_pieces;
 
-		unsigned mask = 3;
-		unsigned has_some = 0;
+		uint8_t mask = UINT8_MAX;
 
-		for (piece_index = piece_index_from;
+		uint8_t last_bit = 0, bit;
+		for (size_t piece_index = piece_index_from;
 		     piece_index < piece_index_to;
-		     ++piece_index)
+		     ++piece_index, last_bit = bit)
 		{
-			int const has_piece = (progress[piece_index / CHAR_BIT] >> (CHAR_BIT - 1 - piece_index % CHAR_BIT)) & 1;
+			bool const has_piece = (progress[piece_index / CHAR_BIT] >> (CHAR_BIT - 1 - piece_index % CHAR_BIT)) & 1;
+			bit = (size_t)((size_t)((piece_index + 1) - piece_index_from) * 8 / (size_t)(piece_index_to - piece_index_from));
 
-			has_some |= has_piece;
-			if (has_piece)
-				continue;
-
-			if (piece_index < piece_index_half) {
-				mask &= ~1;
-				piece_index = piece_index_half;
-			} else {
-				mask &= ~2;
-				break;
-			}
+			mask &= ~(!has_piece * (((UINT8_MAX & ~1) << bit) ^ (UINT8_MAX << last_bit)));
 		}
 
-		addstr(BLOCK_SYMBOLS[0 == mask && has_some ? 4 : mask]);
+		do
+			addstr(SYMBOLS[SYMBOL_MAP[mask]]);
+		while (0 < --count);
 	}
 	addstr("]");
 }
@@ -1361,7 +1407,10 @@ parse_download(struct download *d, struct json_node const *node)
 			break;
 
 		case K_download_bitfield:
-			parse_progress(d, &d->progress, field->val.str);
+			if (d->have != d->total)
+				parse_progress(d, &d->progress, field->val.str);
+			else
+				free(d->progress), d->progress = NULL;
 			break;
 
 		case K_download_bittorrent: {
@@ -1682,7 +1731,7 @@ out:
 static int
 getmainheight(void)
 {
-	return getmaxy(stdscr)/*window height*/ - 1/*status line*/;
+	return LINES - 1/*status line*/;
 }
 
 static void
@@ -2144,14 +2193,14 @@ draw_peer(struct download const *d, size_t i, int *y)
 	struct peer const *p = &d->peers[i];
 	char fmtbuf[5];
 	int n;
-	int x, w = getmaxx(stdscr);
+	int x, width = COLS;
 
 	attr_set(A_NORMAL, 0, NULL);
 	mvprintw(*y, 0, "  %s:%-5u", p->ip, p->port);
 	clrtoeol();
 
 	x = PEER_ADDRESS_WIDTH;
-	move(*y, x + PEER_INFO_WIDTH <= w ? x : w - PEER_INFO_WIDTH);
+	move(*y, x + PEER_INFO_WIDTH <= width ? x : width - PEER_INFO_WIDTH);
 
 	addstr(" ");
 	n = fmt_percent(fmtbuf, p->pieces_have, d->num_pieces);
@@ -2198,6 +2247,14 @@ static void
 draw_our_peer(struct download const *d, int *y)
 {
 	mvprintw((*y)++, 0, "  %*.*s%*.s", -sizeof global.external_ip, sizeof global.external_ip, global.external_ip, 6 + PEER_INFO_WIDTH, "");
+#if 0
+	struct download D = {
+		.num_pieces = 8,
+		.piece_size = 1000
+	};
+	move(getcury(stdscr), COLS - 16 - 3);
+	draw_progress(&D, (uint8_t *)"\x82", 0, 8000);
+#endif
 	draw_progress(d, d->progress, 0, d->total);
 }
 
@@ -2717,7 +2774,7 @@ draw_download(struct download const *d, bool draw_parents, int *y)
 		addstr(" ");
 		addstr(d->tags);
 
-		mx = getmaxx(stdscr);
+		mx = LINES;
 		getyx(stdscr, ny, nx);
 
 		tagwidth = (ny - oy) * mx + (nx - ox);
@@ -2926,7 +2983,7 @@ draw_statusline(void)
 
 	update_title();
 
-	getmaxyx(stdscr, y, w);
+	y = LINES, w = COLS;
 
 	/* print downloads info at the left */
 	--y, x = 0;
@@ -3158,7 +3215,7 @@ runaction_maychanged(struct download *d)
 {
 	if (d) {
 		update_download_tags(d);
-		draw_main();
+		draw_all();
 	}
 }
 
@@ -3168,6 +3225,13 @@ begwin(void)
 {
 	/* heh. this shit gets forgotten. */
 	keypad(stdscr, TRUE);
+
+	refresh();
+
+	/* endwin() + refresh() fuckery does not work. crying. */
+	struct winsize w;
+	if (!ioctl(STDERR_FILENO, TIOCGWINSZ, &w))
+		resizeterm(w.ws_row, w.ws_col);
 
 	/* *slap* */
 	refresh();
@@ -3202,7 +3266,6 @@ run_action(struct download *d, char const *name, ...)
 	else
 		return -1;
 
-	def_prog_mode();
 	endwin();
 
 	if (0 == (pid = vfork())) {
@@ -3219,8 +3282,6 @@ run_action(struct download *d, char const *name, ...)
 	/* become foreground process */
 	tcsetpgrp(STDERR_FILENO, getpgrp());
 	begwin();
-
-	update_title();
 
 	if (WIFEXITED(status) && 127 == WEXITSTATUS(status)) {
 		return -1;
@@ -3278,7 +3339,6 @@ fileout(int must_edit)
 		(prog = "less");
 	}
 
-	def_prog_mode();
 	endwin();
 
 	if (0 == (pid = fork())) {
@@ -3913,9 +3973,6 @@ read_stdin(void)
 	int ch;
 	MEVENT event;
 
-	mousemask(ALL_MOUSE_EVENTS, NULL);
-	mouseinterval(0);
-
 	while (ERR != (ch = getch())) {
 		switch (ch) {
 		/*MAN(KEYS)
@@ -3928,6 +3985,9 @@ read_stdin(void)
 			++selidx;
 			draw_cursor();
 			refresh();
+			break;
+
+		case KEY_RESIZE:
 			break;
 
 		/*MAN(KEYS)
@@ -4534,10 +4594,8 @@ handle_signal_resize(int signum)
 {
 	(void)signum;
 
-	struct winsize ws;
-
-	if (!ioctl(0, TIOCGWINSZ, &ws))
-		resizeterm(ws.ws_row, ws.ws_col);
+	endwin();
+	begwin();
 
 	/* and now we can redraw the whole screen with the
 	 * hopefully updated screen dimensions */
@@ -4665,6 +4723,10 @@ main(int argc, char *argv[])
 		keypad(stdscr, TRUE);
 		/* 8-bit inputs */
 		meta(stdscr, TRUE);
+		/* listen for all mouse events */
+		mousemask(ALL_MOUSE_EVENTS, NULL);
+		/* be immediate */
+		mouseinterval(0);
 
 		update_terminfo();
 

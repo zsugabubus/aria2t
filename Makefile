@@ -12,7 +12,7 @@ INSTALL ?= install
 RM ?= rm -f
 PKGCONFIG ?= pkg-config
 
-CFLAGS += -std=c11 -g -O2 -pedantic -Wall -Wextra
+CFLAGS += -std=c11 -g -O2 -pedantic -Wall -Wextra -Wno-override-init
 
 PACKAGES := ncursesw
 LDLIBS += -lncursesw
