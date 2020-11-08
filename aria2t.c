@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <locale.h>
 #include <ncurses.h>
@@ -492,7 +493,7 @@ static bool
 filter_download(struct download *d, struct download **dd);
 
 static struct download **
-get_download_bygid(char const *gid)
+get_download_by_gid(char const *gid)
 {
 	struct download *d;
 	struct download **dd = downloads;
@@ -596,7 +597,7 @@ notification_handler(char const *method, struct json_node const *event)
 	struct download **dd;
 	struct download *d;
 
-	if (!(dd = get_download_bygid(gid)))
+	if (!(dd = get_download_by_gid(gid)))
 		return;
 	d = *dd;
 
@@ -918,7 +919,8 @@ draw_progress(struct download const *d, uint8_t const *progress, uint64_t offset
 		"\xe2\x96\x93\0", /* dark shade */
 	};
 
-	if (!progress || end_offset <= offset) {
+	/* not enough information */
+	if (!progress && offset < end_offset) {
 		clrtoeol();
 		return;
 	}
@@ -935,7 +937,7 @@ draw_progress(struct download const *d, uint8_t const *progress, uint64_t offset
 		piece_index_to = piece_offset + piece_count * ++i / width;
 
 		++count;
-		if (piece_index_from == piece_index_to)
+		if (piece_index_from == piece_index_to && i < width)
 			continue;
 
 		if (d->num_pieces < piece_index_to)
@@ -1382,6 +1384,9 @@ download_changed(struct download *d)
 static void
 parse_download(struct download *d, struct json_node const *node)
 {
+	if (json_isempty(node))
+		return;
+
 	struct json_node const *field = json_children(node);
 
 	/* only present if non-zero */
@@ -1463,7 +1468,7 @@ parse_download(struct download *d, struct json_node const *node)
 			d->follows = true;
 			/* FALLTHROUGH */
 		case K_download_belongsTo: {
-			struct download **dd = get_download_bygid(field->val.str);
+			struct download **dd = get_download_by_gid(field->val.str);
 
 			if (dd) {
 				struct download *p = *dd;
@@ -2255,7 +2260,7 @@ draw_our_peer(struct download const *d, int *y)
 	move(getcury(stdscr), COLS - 16 - 3);
 	draw_progress(&D, (uint8_t *)"\x82", 0, 8000);
 #endif
-	draw_progress(d, d->progress, 0, d->total);
+	draw_progress(d, d->progress, 0, d->have < d->total ? d->total : 0);
 }
 
 static void
@@ -2300,7 +2305,7 @@ draw_file(struct download const *d, size_t i, int *y, uint64_t offset)
 	szpercent[fmt_percent(szpercent, f->have, f->total)] = '\0';
 
 	attr_set(A_BOLD, 0, NULL);
-	mvprintw((*y)++, 0, "  %6d: ", i + 1);
+	mvprintw((*y)++, 0, "  %6" PRIuPTR ": ", i + 1);
 
 	attr_set(A_NORMAL, 0, NULL);
 	printw("%s/%s[", szhave, sztotal);
@@ -2341,7 +2346,7 @@ draw_file(struct download const *d, size_t i, int *y, uint64_t offset)
 		struct uri const *u = &f->uris[j];
 
 		attr_set(A_NORMAL, 0, NULL);
-		mvprintw((*y)++, 0, "      %s╴",
+		mvprintw((*y)++, 0, "       %s╴",
 		         j + 1 < f->num_uris ? "├" : "└");
 
 		attr_set(u->status == uri_status_used ? A_BOLD : A_NORMAL, 0, NULL);
@@ -2355,7 +2360,7 @@ draw_file(struct download const *d, size_t i, int *y, uint64_t offset)
 			char fmtbuf[5];
 			int n;
 
-			mvprintw((*y)++, 0, "      %s   ↓  ",
+			mvprintw((*y)++, 0, "       %s   ↓  ",
 			         j + 1 < f->num_uris ? "│" : " ");
 
 			attr_set(A_BOLD, COLOR_DOWN, NULL);
@@ -2871,7 +2876,7 @@ on_downloads_change(int stickycurs)
 
 		/* move selection if download moved */
 		if (stickycurs && 0 != memcmp(selgid, downloads[selidx]->gid, sizeof selgid))
-			selidx = get_download_bygid(selgid) - downloads;
+			selidx = get_download_by_gid(selgid) - downloads;
 	}
 
 	/* then also update them on the screen */
@@ -3154,7 +3159,7 @@ update_all_handler(struct json_node const *result, void *arg)
 			 * we check if only we modified the list */
 			struct download **dd = download_index == num_downloads
 				? new_download()
-				: get_download_bygid(json_get(node, "gid")->val.str);
+				: get_download_by_gid(json_get(node, "gid")->val.str);
 			if (!dd)
 				continue;
 			d = *dd;
@@ -3539,11 +3544,11 @@ add_downloads_handler(struct json_node const *result, void *arg)
 
 			if (json_str == json_type(gid)) {
 				/* single GID returned */
-				if ((dd = get_download_bygid(gid->val.str)))
+				if ((dd = get_download_by_gid(gid->val.str)))
 					selidx = dd - downloads;
 			} else {
 				/* get first GID of the array */
-				if ((dd = get_download_bygid(json_children(gid)->val.str)))
+				if ((dd = get_download_by_gid(json_children(gid)->val.str)))
 					selidx = dd - downloads;
 			}
 		}
