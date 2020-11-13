@@ -567,7 +567,7 @@ free_rpc(struct rpc_request *rpc)
 }
 
 static void
-on_downloads_change(int stickycurs);
+on_downloads_change(bool stickycurs);
 
 static void
 update(void);
@@ -576,8 +576,23 @@ static bool
 download_insufficient(struct download *d)
 {
 	return d->display_name == NONAME ||
-		(-DOWNLOAD_ERROR == d->status && !d->error_message) ||
-		(is_local && 0 == d->num_files);
+	       -DOWNLOAD_WAITING == d->status ||
+	       -DOWNLOAD_ERROR == d->status ||
+	       (is_local && 0 == d->num_files);
+}
+
+static void
+queue_changed(void)
+{
+	struct download **dd = downloads;
+	struct download **const end = &downloads[num_downloads];
+
+	for (; dd < end; ++dd) {
+		struct download *const d = *dd;
+
+		if (DOWNLOAD_WAITING == abs(d->status))
+			d->status = -DOWNLOAD_WAITING;
+	}
 }
 
 static void
@@ -604,11 +619,14 @@ notification_handler(char const *method, struct json_node const *event)
 	int8_t const new_status = STATUS_MAP[K_notification_parse(method + strlen("aria2.on"))];
 
 	if (new_status != DOWNLOAD_UNKNOWN && new_status != d->status) {
-		global.num_perstatus[abs(d->status)] -= 1;
-		d->status = -new_status;
-		global.num_perstatus[new_status] += 1;
+		if (DOWNLOAD_WAITING == abs(d->status))
+			queue_changed();
 
-		on_downloads_change(1);
+		--global.num_perstatus[abs(d->status)];
+		d->status = -new_status;
+		++global.num_perstatus[new_status];
+
+		on_downloads_change(true);
 		refresh();
 
 		/* in a perfect world we should update only this one download */
@@ -668,7 +686,7 @@ new_rpc(void)
 			goto found;
 	}
 
-	set_error_message("too much pending messages");
+	set_error_message("too many pending messages");
 
 	return NULL;
 
@@ -722,8 +740,7 @@ do_rpc(struct rpc_request *rpc)
 {
 	json_write_endobj(jw);
 	if (-1 == ws_write(jw->buf, jw->len)) {
-		set_error_message("write: %s",
-				strerror(errno));
+		set_error_message("write: %s", strerror(errno));
 		free_rpc(rpc);
 
 		return false;
@@ -808,11 +825,7 @@ uri_addserver(struct uri *u, struct server *s)
 static void
 parse_file_servers(struct file *f, struct json_node const *node)
 {
-	if (json_isempty(node))
-		return;
-
-	node = json_children(node);
-	do {
+	for (node = json_first(node); node; node = json_next(node)) {
 		struct json_node const *field = json_children(node);
 		struct uri *u = u;
 		struct server s;
@@ -833,7 +846,7 @@ parse_file_servers(struct file *f, struct json_node const *node)
 			s.current_uri = strdup(s.current_uri);
 
 		uri_addserver(u, &s);
-	} while ((node = json_next(node)));
+	}
 }
 
 static void
@@ -919,13 +932,18 @@ draw_progress(struct download const *d, uint8_t const *progress, uint64_t offset
 		"\xe2\x96\x93\0", /* dark shade */
 	};
 
-	/* not enough information */
-	if (!progress && offset < end_offset) {
+	int const width = COLS - getcurx(stdscr) - 3;
+
+	if (/* not enough information */
+	    !d->piece_size ||
+	    (!progress && offset < end_offset) ||
+	    /* not enough space */
+	    width <= 0)
+	{
 		clrtoeol();
 		return;
 	}
 
-	int const width = COLS - getcurx(stdscr) - 3;
 	uint32_t const piece_offset = offset / d->piece_size;
 	uint32_t const end_piece_offset = (end_offset + (d->piece_size - 1)) / d->piece_size;
 	uint32_t const piece_count = end_piece_offset - piece_offset;
@@ -1156,23 +1174,20 @@ parse_servers(struct download *d, struct json_node const *node)
 		}
 	}
 
-	if (!json_isempty(node)) {
-		node = json_children(node);
+	for (node = json_first(node); node; node = json_next(node)) {
+		struct json_node const *field = json_children(node);
+		struct json_node const *servers = servers;
+		uint32_t file_index = file_index;
+
 		do {
-			struct json_node const *field = json_children(node);
-			struct json_node const *servers = servers;
-			uint32_t file_index = file_index;
+			if (0 == strcmp(field->key, "index"))
+				file_index = atoi(field->val.str) - 1;
+			else if (0 == strcmp(field->key, "servers"))
+				servers = field;
+		} while ((field = json_next(field)));
 
-			do {
-				if (0 == strcmp(field->key, "index"))
-					file_index = atoi(field->val.str) - 1;
-				else if (0 == strcmp(field->key, "servers"))
-					servers = field;
-			} while ((field = json_next(field)));
-
-			assert(file_index < d->num_files);
-			parse_file_servers(&d->files[file_index], servers);
-		} while ((node = json_next(node)));
+		assert(file_index < d->num_files);
+		parse_file_servers(&d->files[file_index], servers);
 	}
 
 	/* now deallocate server lists where num_servers == 0 */
@@ -1234,11 +1249,7 @@ parse_download_files(struct download *d, struct json_node const *node)
 	if (!(d->files = malloc(d->num_files * sizeof *(d->files))))
 		return;
 
-	if (json_isempty(node))
-		return;
-
-	node = json_children(node);
-	do {
+	for (node = json_first(node); node; node = json_next(node)) {
 		struct json_node const *field = json_children(node);
 		struct file file;
 		int index = -1;
@@ -1277,14 +1288,10 @@ parse_download_files(struct download *d, struct json_node const *node)
 				struct json_node const *uris;
 				uint32_t uri_index = 0;
 
-				if (json_isempty(field))
-					continue;
-
-				uris = json_children(field);
 				file.num_uris = json_len(field);
 				file.uris = malloc(file.num_uris * sizeof *(file.uris));
 
-				do {
+				for (uris = json_first(field); uris; uris = json_next(uris)) {
 					struct json_node const *field = json_children(uris);
 					struct uri u;
 
@@ -1304,7 +1311,7 @@ parse_download_files(struct download *d, struct json_node const *node)
 						}
 					} while ((field = json_next(field)));
 					file.uris[uri_index++] = u;
-				} while ((uris = json_next(uris)));
+				}
 			}
 				break;
 			}
@@ -1312,7 +1319,7 @@ parse_download_files(struct download *d, struct json_node const *node)
 
 		assert(index >= 0);
 		d->files[index] = file;
-	} while ((node = json_next(node)));
+	}
 
 	update_download_tags(d);
 	update_display_name(d);
@@ -1384,15 +1391,13 @@ download_changed(struct download *d)
 static void
 parse_download(struct download *d, struct json_node const *node)
 {
-	if (json_isempty(node))
-		return;
-
-	struct json_node const *field = json_children(node);
-
 	/* only present if non-zero */
 	d->verified = 0;
 
-	do {
+	for (struct json_node const *field = json_first(node);
+	     field;
+	     field = json_next(field))
+	{
 		switch (K_download_parse(field->key)) {
 		case K_download_gid:
 			assert(strlen(field->val.str) == sizeof d->gid - 1);
@@ -1443,9 +1448,12 @@ parse_download(struct download *d, struct json_node const *node)
 			int8_t const new_status = STATUS_MAP[K_status_parse(field->val.str)];
 
 			if (new_status != d->status) {
-				global.num_perstatus[abs(d->status)] -= 1;
+				if (DOWNLOAD_WAITING == abs(d->status))
+					queue_changed();
+
+				--global.num_perstatus[abs(d->status)];
 				d->status = -new_status;
-				global.num_perstatus[new_status] += 1;
+				++global.num_perstatus[new_status];
 			}
 		}
 			break;
@@ -1523,7 +1531,7 @@ parse_download(struct download *d, struct json_node const *node)
 			/* ignore */
 			break;
 		}
-	} while ((field = json_next(field)));
+	}
 }
 
 typedef void(*parse_options_cb)(char const *, char const *, void *);
@@ -1531,13 +1539,8 @@ typedef void(*parse_options_cb)(char const *, char const *, void *);
 static void
 parse_options(struct json_node const *node, parse_options_cb cb, void *arg)
 {
-	if (json_isempty(node))
-		return;
-
-	node = json_children(node);
-	do
+	for (node = json_first(node); node; node = json_next(node))
 		cb(node->key, node->val.str, arg);
-	while ((node = json_next(node)));
 }
 
 static void
@@ -1632,6 +1635,7 @@ struct update_arg {
 	bool has_get_peers: 1;
 	bool has_get_servers: 1;
 	bool has_get_options: 1;
+	bool has_get_position: 1;
 };
 
 static void
@@ -1652,6 +1656,8 @@ parse_downloads(struct json_node const *result, struct update_arg *arg)
 			if (arg->has_get_peers || arg->has_get_servers)
 				result = json_next(result);
 			if (arg->has_get_options)
+				result = json_next(result);
+			if (arg->has_get_position)
 				result = json_next(result);
 			continue;
 		}
@@ -1684,6 +1690,16 @@ parse_downloads(struct json_node const *result, struct update_arg *arg)
 			} else {
 				node = json_children(result);
 				parse_options(node, (parse_options_cb)parse_option, d);
+			}
+		}
+
+		if (arg->has_get_position) {
+			result = json_next(result);
+			if (json_obj == json_type(result)) {
+				error_handler(result);
+			} else {
+				node = json_children(result);
+				d->queue_index = node->val.num;
 			}
 		}
 
@@ -1720,7 +1736,7 @@ update_handler(struct json_node const *result, struct update_arg *arg)
 	result = json_next(result);
 	if (result) {
 		parse_downloads(result, arg);
-		on_downloads_change(1);
+		on_downloads_change(true);
 	} else {
 		draw_statusline();
 	}
@@ -1945,6 +1961,24 @@ update(void)
 				d->requested_options = true;
 			}
 
+			if ((arg->has_get_position = (-DOWNLOAD_WAITING == d->status))) {
+				json_write_beginobj(jw);
+				json_write_key(jw, "methodName");
+				json_write_str(jw, "aria2.changePosition");
+				json_write_key(jw, "params");
+				json_write_beginarr(jw);
+				/* “secret” */
+				json_write_str(jw, secret_token);
+				/* “gid” */
+				json_write_str(jw, d->gid);
+				/* “pos” */
+				json_write_num(jw, 0);
+				/* “how” */
+				json_write_str(jw, "POS_CUR");
+				json_write_endarr(jw);
+				json_write_endobj(jw);
+			}
+
 			d->status = abs(d->status);
 			++arg;
 		}
@@ -1960,13 +1994,32 @@ update(void)
 		periodic = NULL;
 }
 
+
 static void
-change_download_position(struct download *d, int32_t pos, int whence)
+change_position_handler(struct json_node const *result, struct download *d)
+{
+	if (result) {
+		queue_changed();
+		update();
+
+		d->queue_index = result->val.num;
+		on_downloads_change(true);
+		refresh();
+	}
+
+	unref_download(d);
+}
+
+static void
+change_position(struct download *d, int32_t pos, int whence)
 {
 	struct rpc_request *rpc;
 
 	if (!(rpc = new_rpc()))
 		return;
+
+	rpc->handler = (rpc_handler)change_position_handler;
+	rpc->arg = ref_download(d);
 
 	json_write_key(jw, "method");
 	json_write_str(jw, "aria2.changePosition");
@@ -1982,20 +2035,10 @@ change_download_position(struct download *d, int32_t pos, int whence)
 	/* “how” */
 	char *how;
 	switch (whence) {
-	case SEEK_SET:
-		how = "POS_SET";
-		break;
-
-	case SEEK_CUR:
-		how = "POS_CUR";
-		break;
-
-	case SEEK_END:
-		how = "POS_END";
-		break;
-
-	default:
-		abort();
+	case SEEK_SET: how = "POS_SET"; break;
+	case SEEK_CUR: how = "POS_CUR"; break;
+	case SEEK_END: how = "POS_END"; break;
+	default: abort();
 	};
 	json_write_str(jw, how);
 
@@ -2136,7 +2179,7 @@ purge_download_handler(struct json_node const *result, struct download *d)
 			}
 		}
 
-		on_downloads_change(1);
+		on_downloads_change(true);
 		refresh();
 	}
 
@@ -2328,8 +2371,13 @@ draw_file(struct download const *d, size_t i, int *y, uint64_t offset)
 		name = f->path;
 		if (d->dir) {
 			size_t const dir_size = strlen(d->dir);
-			if (!strncmp(f->path, d->dir, dir_size) && '/' == f->path[dir_size])
+			if (!strncmp(f->path, d->dir, dir_size) &&
+			    '/' == f->path[dir_size]) {
 				name = f->path + dir_size + 1;
+				/* leading slash is misleading */
+				while ('/' == *name)
+					++name;
+			}
 		}
 	} else {
 		name = f->selected ? "(not downloaded yet)" : "(none)";
@@ -2473,10 +2521,9 @@ downloadcmp(struct download const **pthis, struct download const **pother, void 
 	if (cmp)
 		return cmp;
 
-	if (DOWNLOAD_WAITING == this_status) {
+	if (DOWNLOAD_WAITING == this_status)
 		/* sort by position in queue */
-		return this->queue_index - other->queue_index;
-	}
+		return other->queue_index - this->queue_index;
 
 	if (DOWNLOAD_ACTIVE == this_status) {
 		/* prefer not stalled downloads */
@@ -2858,7 +2905,7 @@ draw_downloads(void)
 }
 
 static void
-on_downloads_change(int stickycurs)
+on_downloads_change(bool stickycurs)
 {
 	/* re-sort downloads list */
 	if (0 < num_downloads) {
@@ -2875,7 +2922,7 @@ on_downloads_change(int stickycurs)
 		qsort_r(downloads, num_downloads, sizeof *downloads, (int(*)(void const *, void const *, void*))downloadcmp, NULL);
 
 		/* move selection if download moved */
-		if (stickycurs && 0 != memcmp(selgid, downloads[selidx]->gid, sizeof selgid))
+		if (stickycurs && memcmp(selgid, downloads[selidx]->gid, sizeof selgid))
 			selidx = get_download_by_gid(selgid) - downloads;
 	}
 
@@ -3148,11 +3195,7 @@ update_all_handler(struct json_node const *result, void *arg)
 
 		downloads_list = json_children(result);
 
-		if (json_isempty(downloads_list))
-			continue;
-
-		node = json_children(downloads_list);
-		do {
+		for (node = json_first(downloads_list); node; node = json_next(node)) {
 			struct download *d;
 			/* XXX: parse_download's belongsTo and followedBy may
 			 * create the download before this update arrives, so
@@ -3169,14 +3212,10 @@ update_all_handler(struct json_node const *result, void *arg)
 			d->initialized = true;
 
 			parse_download(d, node);
-			if (DOWNLOAD_WAITING == abs(d->status)) {
-				/* FIXME: warning: it is some serious shit */
-				d->queue_index = (num_downloads - 1) - download_index;
-			}
 
 			download_changed(d);
 			++download_index;
-		} while ((node = json_next(node)));
+		}
 
 	} while ((result = json_next(result)));
 
@@ -3329,7 +3368,7 @@ out:
 }
 
 static int
-fileout(int must_edit)
+fileout(bool must_edit)
 {
 	char *prog;
 	pid_t pid;
@@ -3403,7 +3442,6 @@ show_options_handler(struct json_node const *result, struct download *d)
 	size_t linesiz;
 	struct rpc_request *rpc;
 	int action;
-	struct stat stbefore, stafter;
 
 	if (!result)
 		goto out;
@@ -3415,7 +3453,6 @@ show_options_handler(struct json_node const *result, struct download *d)
 
 	if (!(f = fopen(session_file, "w")))
 		goto out;
-	(void)fstat(fileno(f), &stbefore);
 
 	parse_options(result, (parse_options_cb)write_option, f);
 	parse_options(result, (parse_options_cb)parse_option, d);
@@ -3423,18 +3460,13 @@ show_options_handler(struct json_node const *result, struct download *d)
 	fclose(f);
 
 	if ((action = run_action(NULL, d ? "i" : "I")) < 0)
-		action = fileout(0);
+		action = fileout(false);
 
 	if (EXIT_SUCCESS != action)
 		goto out;
 
 	if (!(f = fopen(session_file, "r")))
 		goto out;
-	(void)fstat(fileno(f), &stafter);
-
-	/* not modified */
-	if (stafter.st_mtim.tv_sec <= stbefore.st_mtim.tv_sec)
-		goto out_fclose;
 
 	if (!(rpc = new_rpc()))
 		goto out_fclose;
@@ -3450,10 +3482,9 @@ show_options_handler(struct json_node const *result, struct download *d)
 
 	/* “secret” */
 	json_write_str(jw, secret_token);
-	if (d) {
+	if (d)
 		/* “gid” */
 		json_write_str(jw, d->gid);
-	}
 	json_write_beginobj(jw);
 
 	line = NULL, linesiz = 0;
@@ -3529,11 +3560,10 @@ add_downloads_handler(struct json_node const *result, void *arg)
 
 	(void)arg;
 
-	if (!result || json_isempty(result))
+	if (!result)
 		return;
 
-	result = json_children(result);
-	do {
+	for (result = json_first(result); result; result = json_next(result)) {
 		struct download **dd;
 
 		if (json_obj == json_type(result)) {
@@ -3552,7 +3582,7 @@ add_downloads_handler(struct json_node const *result, void *arg)
 					selidx = dd - downloads;
 			}
 		}
-	} while ((result = json_next(result)));
+	}
 
 	switch (action.kind) {
 	case act_add_downloads:
@@ -3582,18 +3612,15 @@ add_downloads(char cmd)
 
 	if ('\0' != cmd) {
 		if ((action = run_action(NULL, "%c", cmd)) < 0)
-			action = fileout(1);
+			action = fileout(true);
 
 		if (EXIT_SUCCESS != action)
 			return;
 
 		clear_error_message();
 
-		if (!(f = fopen(session_file, "r"))) {
-			set_error_message("fopen(\"%s\", \"r\"): %s",
-					session_file, strerror(errno));
+		if (!(f = fopen(session_file, "r")))
 			return;
-			}
 	} else {
 		f = stdin;
 	}
@@ -4164,17 +4191,17 @@ read_stdin(void)
 		/*MAN(KEYS)
 		 * .TP
 		 * .B J
-		 * Move selected download backward in the queue.
+		 * Move selected download forward in the queue.
 		 */
 		case 'J':
 		/*MAN(KEYS)
 		 * .TP
 		 * .B K
-		 * Move selected download forward in the queue.
+		 * Move selected download backward in the queue.
 		 */
 		case 'K':
 			if (0 < num_downloads)
-				change_download_position(downloads[selidx], ch == 'J' ? 1 : -1, SEEK_CUR);
+				change_position(downloads[selidx], 'J' == ch ? -1 : 1, SEEK_CUR);
 			break;
 
 		/*MAN(KEYS)
@@ -4327,8 +4354,6 @@ read_stdin(void)
 			if (isatty(STDOUT_FILENO)) {
 				goto default_action;
 			} else {
-				endwin();
-
 				if (0 < num_downloads) {
 					struct download const *d = downloads[selidx];
 					printf("%s\n", d->gid);
