@@ -1795,8 +1795,6 @@ update(void)
 		struct download **end = &downloads[num_downloads];
 		struct download **dd = downloads;
 		struct update_arg *arg;
-		uint8_t topstatus, botstatus, status;
-		size_t arglen = 0;
 
 		if (VIEWS[1] == view) {
 			top = &downloads[topidx];
@@ -1808,16 +1806,7 @@ update(void)
 			bot = top;
 		}
 
-		topstatus = abs((*top)->status);
-		botstatus = abs((*bot)->status);
-
-		arglen = 0;
-		status = topstatus;
-		do
-			arglen += global.num_perstatus[status];
-		while (++status <= botstatus);
-
-		if (!(arg = malloc(arglen * sizeof *arg))) {
+		if (!(arg = malloc(num_downloads * sizeof *arg))) {
 			free_rpc(rpc);
 			return;
 		}
@@ -1828,12 +1817,6 @@ update(void)
 			bool visible = top <= dd && dd <= bot;
 			uint8_t keyidx = 0;
 			char *keys[20];
-
-			if (abs(d->status) < topstatus)
-				continue;
-
-			if (botstatus < abs(d->status))
-				break;
 
 #define WANT(key) keys[keyidx++] = key;
 
