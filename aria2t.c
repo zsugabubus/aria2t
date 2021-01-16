@@ -4343,7 +4343,7 @@ read_stdin(void)
 		 * .TP
 		 * .B !
 		 * Do next command by force. With Torrent downloads, for
-		 * example, it means that it will not contant to tracker(s).
+		 * example, it means that it will not contact to tracker(s).
 		 */
 		case '!':
 			do_forced = 1;
