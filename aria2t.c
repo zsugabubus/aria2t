@@ -32,37 +32,30 @@
 
 #define XATTR_NAME "user.tags"
 
+typedef struct json_node JSONNode;
+
 #define addspaces(n) addnstr("                                          "/*31+5+6=42*/, n);
 
-#define COLOR_DOWN 1
-#define COLOR_UP   2
-#define COLOR_CONN 3
-#define COLOR_ERR  4
-#define COLOR_EOF  5
+enum {
+	COLOR_DOWN = 1,
+	COLOR_UP,
+	COLOR_CONN,
+	COLOR_ERR,
+	COLOR_EOF,
+};
 
 #define CONTROL(letter) ((letter) - '@')
 #define ARRAY_SIZE(x) (sizeof x / sizeof *x)
 
 #define VIEWS "\0dfp"
 
-#define DOWNLOAD_SYMBOLS  "?w>|.-*"
-/* NOTE: order is relevant for sorting */
-#define DOWNLOAD_UNKNOWN  0
-#define DOWNLOAD_WAITING  1
-#define DOWNLOAD_ACTIVE   2
-#define DOWNLOAD_PAUSED   3
-#define DOWNLOAD_COMPLETE 4
-#define DOWNLOAD_REMOVED  5
-#define DOWNLOAD_ERROR    6
-#define DOWNLOAD_COUNT    7
-
 /* str := "true" | "false" */
 #define IS_TRUE(str) ('t' == str[0])
 
-#define PEER_ADDRESS_WIDTH (int)(2 + sizeof(((struct peer *)0)->ip) + 1 + 5)
+#define PEER_ADDRESS_WIDTH (int)(2 + sizeof(((Peer *)0)->ip) + 1 + 5)
 #define PEER_INFO_WIDTH 24
 
-struct peer {
+typedef struct {
 	uint8_t peer_id[20];
 
 	char ip[INET6_ADDRSTRLEN];
@@ -80,37 +73,51 @@ struct peer {
 	uint64_t upload_speed; /* to peer */
 
 	uint8_t *progress;
-};
+} Peer;
 
-struct server {
+typedef struct {
 	char *current_uri;
 	uint64_t download_speed;
+} Server;
+
+enum URIStatus {
+	URI_STATUS_WAITING,
+	URI_STATUS_USED
 };
 
-enum uri_status {
-	uri_status_waiting,
-	uri_status_used
-};
-
-struct uri {
-	enum uri_status status;
+typedef struct {
+	enum URIStatus status;
 	uint32_t num_servers;
 	char *uri;
-	struct server *servers;
-};
+	Server *servers;
+} URI;
 
-struct file {
+typedef struct {
 	char *path;
 	uint64_t total;
 	uint64_t have;
 	uint32_t num_uris;
 	bool selected;
-	struct uri *uris;
-};
+	URI *uris;
+} File;
 
 static char const *const NONAME = "?";
 
-struct download {
+/* NOTE: Order is relevant for sorting. */
+enum {
+	D_UNKNOWN,
+	D_WAITING,
+	D_ACTIVE,
+	D_PAUSED,
+	D_COMPLETE,
+	D_REMOVED,
+	D_ERROR,
+	D_NB,
+};
+static char DOWNLOAD_SYMBOLS[D_NB] = "?w>|.-*";
+
+typedef struct Download Download;
+struct Download {
 	char *name;
 	char const *display_name;
 	char gid[16 + 1];
@@ -119,7 +126,7 @@ struct download {
 	bool deleted: 1; /* one strong ref: is on the list or not */
 	bool initialized: 1;
 	bool requested_options: 1;
-	int8_t status; /* DOWNLOAD_*; or negative if changed. */
+	int8_t status; /* D_*; or negative if changed. */
 	uint16_t queue_index;
 
 	char *error_message;
@@ -148,18 +155,18 @@ struct download {
 	char *dir;
 
 	bool follows; /* follows or belongsTo |parent| */
-	struct peer *peers;
-	struct file *files;
+	Peer *peers;
+	File *files;
 	uint8_t *progress;
 
-	struct download *parent;
-	struct download *first_child;
-	struct download *next_sibling;
+	Download *parent;
+	Download *first_child;
+	Download *next_sibling;
 
 	char *tags;
 };
 
-static struct download **downloads;
+static Download **downloads;
 static size_t num_downloads;
 
 static struct {
@@ -181,20 +188,20 @@ static struct {
 	uint64_t num_upload_limited;
 
 	/* number of downloads per statuses */
-	uint32_t num_perstatus[DOWNLOAD_COUNT];
+	uint32_t num_perstatus[D_NB];
 
 	char external_ip[INET6_ADDRSTRLEN];
 } global;
 
 static struct {
 	enum {
-		act_visual = 0,
-		act_add_downloads,
-		act_shutdown,
-		act_print_gid,
-		act_pause,
-		act_unpause,
-		act_purge
+		ACT_VISUAL = 0,
+		ACT_ADD_DOWNLOADS,
+		ACT_SHUTDOWN,
+		ACT_PRINT_GID,
+		ACT_PAUSE,
+		ACT_UNPAUSE,
+		ACT_PURGE
 	} kind;
 	bool uses_files;
 	size_t num_sel;
@@ -217,21 +224,30 @@ struct pollfd pfds[2];
 static struct timespec period;
 static void(*periodic)(void);
 
-typedef void(*rpc_handler)(struct json_node const *result, void *arg);
-static struct rpc_request {
-	rpc_handler handler;
+typedef void(*RPCHandler)(JSONNode const *result, void *arg);
+typedef struct {
+	RPCHandler handler;
 	void *arg;
-} rpc_requests[10];
+} RPCRequest;
+static RPCRequest rpc_requests[10];
 
 static char view = VIEWS[1];
 
 static int curx = 0;
 static bool downloads_need_reflow;
 static int tag_col_width = 0;
-static struct download const *longest_tag;
+static Download const *longest_tag;
 static int do_forced = 0;
-static int oldselidx, selidx;
-static int oldtopidx, topidx;
+
+static int oldidx;
+
+/* Logical state. */
+static int selidx, topidx;
+
+/* Visual state. */
+static struct {
+	int selidx, topidx;
+} tui;
 
 static struct json_writer jw[1];
 
@@ -240,23 +256,23 @@ static void draw_main(void);
 static void draw_files(void);
 static void draw_peers(void);
 static void draw_downloads(void);
-static void draw_download(struct download const *d, bool draw_parents, int *y);
+static void draw_download(Download const *d, bool draw_parents, int *y);
 
 static void
-free_peer(struct peer *p)
+free_peer(Peer *p)
 {
 	free(p->progress);
 	(void)p;
 }
 
 static void
-free_server(struct server *s)
+free_server(Server *s)
 {
 	free(s->current_uri);
 }
 
 static void
-free_uri(struct uri *u)
+free_uri(URI *u)
 {
 	free(u->uri);
 
@@ -269,7 +285,7 @@ free_uri(struct uri *u)
 }
 
 static void
-free_file(struct file *f)
+free_file(File *f)
 {
 	if (f->uris) {
 		for (uint32_t i = 0; i < f->num_uris; ++i)
@@ -282,7 +298,7 @@ free_file(struct file *f)
 }
 
 static void
-free_peers(struct peer *peers, uint32_t num_peers)
+free_peers(Peer *peers, uint32_t num_peers)
 {
 	if (!peers)
 		return;
@@ -294,7 +310,7 @@ free_peers(struct peer *peers, uint32_t num_peers)
 }
 
 static void
-free_files_of(struct download *d)
+free_files_of(Download *d)
 {
 	if (!d->files)
 		return;
@@ -306,17 +322,17 @@ free_files_of(struct download *d)
 }
 
 static void
-unref_download(struct download *d);
+unref_download(Download *d);
 
-static struct download const *
-download_prev_sibling(struct download const *d)
+static Download const *
+download_prev_sibling(Download const *d)
 {
 	/* no family at all */
 	if (!d->parent)
 		return NULL;
 
 	/* first child */
-	struct download const *sibling = d->parent->first_child;
+	Download const *sibling = d->parent->first_child;
 	if (d == sibling)
 		return NULL;
 
@@ -327,7 +343,7 @@ download_prev_sibling(struct download const *d)
 }
 
 static void
-free_download(struct download *d)
+free_download(Download *d)
 {
 	free_files_of(d);
 	free_peers(d->peers, d->num_peers);
@@ -339,8 +355,8 @@ free_download(struct download *d)
 	free(d);
 }
 
-static struct download *
-ref_download(struct download *d)
+static Download *
+ref_download(Download *d)
 {
 	if (d)
 		++d->refcnt;
@@ -348,7 +364,7 @@ ref_download(struct download *d)
 }
 
 static void
-unref_download(struct download *d)
+unref_download(Download *d)
 {
 	if (!d)
 		return;
@@ -359,9 +375,9 @@ unref_download(struct download *d)
 }
 
 static void
-delete_download_at(struct download **dd)
+delete_download_at(Download **dd)
 {
-	struct download *d = *dd;
+	Download *d = *dd;
 
 	assert(!d->deleted);
 
@@ -372,7 +388,7 @@ delete_download_at(struct download **dd)
 		longest_tag = NULL;
 	}
 
-	for (struct download *next, *sibling = d->first_child;
+	for (Download *next, *sibling = d->first_child;
 	     sibling;
 	     sibling = next)
 	{
@@ -383,7 +399,7 @@ delete_download_at(struct download **dd)
 
 	/* remove download from family tree */
 	if (d->parent) {
-		struct download *sibling = d->parent->first_child;
+		Download *sibling = d->parent->first_child;
 		if (d == sibling) {
 			d->parent->first_child = d->next_sibling;
 		} else {
@@ -415,7 +431,7 @@ clear_downloads(void)
 }
 
 static void
-default_handler(struct json_node const *result, void *arg)
+default_handler(JSONNode const *result, void *arg)
 {
 	(void)result, (void)arg;
 	/* just do nothing */
@@ -448,11 +464,11 @@ load_config(void)
 	sprintf(secret_token, "token:%s", str);
 }
 
-static struct download **
+static Download **
 new_download(void)
 {
-	struct download *d;
-	struct download **dd;
+	Download *d;
+	Download **dd;
 
 	if (!(dd = realloc(downloads, (num_downloads + 1) * sizeof *downloads)))
 		return NULL;
@@ -464,7 +480,7 @@ new_download(void)
 
 	d->refcnt = 1;
 	d->display_name = NONAME;
-	global.num_perstatus[DOWNLOAD_UNKNOWN] += 1;
+	global.num_perstatus[D_UNKNOWN] += 1;
 
 	return dd;
 }
@@ -472,13 +488,13 @@ new_download(void)
 /* return whether |d| is still valid (on the list); |pdd| will be filled with
  * location of |d| if not NULL */
 static bool
-upgrade_download(struct download const *d, struct download ***pdd)
+upgrade_download(Download const *d, Download ***pdd)
 {
 	if (d->deleted)
 		return false;
 
 	if (pdd) {
-		struct download **dd = downloads;
+		Download **dd = downloads;
 
 		for (; *dd != d; ++dd)
 			;
@@ -490,14 +506,14 @@ upgrade_download(struct download const *d, struct download ***pdd)
 }
 
 static bool
-filter_download(struct download *d, struct download **dd);
+filter_download(Download *d, Download **dd);
 
-static struct download **
+static Download **
 get_download_by_gid(char const *gid)
 {
-	struct download *d;
-	struct download **dd = downloads;
-	struct download **const end = &downloads[num_downloads];
+	Download *d;
+	Download **dd = downloads;
+	Download **const end = &downloads[num_downloads];
 
 	for (; dd < end; ++dd)
 		if (0 == memcmp((*dd)->gid, gid, sizeof (*dd)->gid))
@@ -547,11 +563,11 @@ set_error_message(char const *format, ...)
 }
 
 static void
-error_handler(struct json_node const *error)
+error_handler(JSONNode const *error)
 {
-	struct json_node const *message = json_get(error, "message");
+	JSONNode const *message = json_get(error, "message");
 
-	if (act_visual == action.kind) {
+	if (ACT_VISUAL == action.kind) {
 		set_error_message("%s", message->val.str);
 		refresh();
 	} else {
@@ -561,7 +577,7 @@ error_handler(struct json_node const *error)
 }
 
 static void
-free_rpc(struct rpc_request *rpc)
+free_rpc(RPCRequest *rpc)
 {
 	rpc->handler = NULL;
 }
@@ -573,44 +589,44 @@ static void
 update(void);
 
 static bool
-download_insufficient(struct download *d)
+download_insufficient(Download *d)
 {
 	return d->display_name == NONAME ||
-	       -DOWNLOAD_WAITING == d->status ||
-	       -DOWNLOAD_ERROR == d->status ||
+	       -D_WAITING == d->status ||
+	       -D_ERROR == d->status ||
 	       (is_local && 0 == d->num_files);
 }
 
 static void
 queue_changed(void)
 {
-	struct download **dd = downloads;
-	struct download **const end = &downloads[num_downloads];
+	Download **dd = downloads;
+	Download **const end = &downloads[num_downloads];
 
 	for (; dd < end; ++dd) {
-		struct download *const d = *dd;
+		Download *const d = *dd;
 
-		if (DOWNLOAD_WAITING == abs(d->status))
-			d->status = -DOWNLOAD_WAITING;
+		if (D_WAITING == abs(d->status))
+			d->status = -D_WAITING;
 	}
 }
 
 static void
-notification_handler(char const *method, struct json_node const *event)
+notification_handler(char const *method, JSONNode const *event)
 {
 	static int8_t const STATUS_MAP[] = {
-		[K_notification_none              ] = DOWNLOAD_UNKNOWN,
-		[K_notification_DownloadStart     ] = DOWNLOAD_ACTIVE,
-		[K_notification_DownloadPause     ] = DOWNLOAD_PAUSED,
-		[K_notification_DownloadStop      ] = DOWNLOAD_PAUSED,
-		[K_notification_DownloadComplete  ] = DOWNLOAD_COMPLETE,
-		[K_notification_DownloadError     ] = DOWNLOAD_ERROR,
-		[K_notification_BtDownloadComplete] = DOWNLOAD_ACTIVE
+		[K_notification_none              ] = D_UNKNOWN,
+		[K_notification_DownloadStart     ] = D_ACTIVE,
+		[K_notification_DownloadPause     ] = D_PAUSED,
+		[K_notification_DownloadStop      ] = D_PAUSED,
+		[K_notification_DownloadComplete  ] = D_COMPLETE,
+		[K_notification_DownloadError     ] = D_ERROR,
+		[K_notification_BtDownloadComplete] = D_ACTIVE
 	};
 
 	char *const gid = json_get(event, "gid")->val.str;
-	struct download **dd;
-	struct download *d;
+	Download **dd;
+	Download *d;
 
 	if (!(dd = get_download_by_gid(gid)))
 		return;
@@ -618,8 +634,8 @@ notification_handler(char const *method, struct json_node const *event)
 
 	int8_t const new_status = STATUS_MAP[K_notification_parse(method + strlen("aria2.on"))];
 
-	if (new_status != DOWNLOAD_UNKNOWN && new_status != d->status) {
-		if (DOWNLOAD_WAITING == abs(d->status))
+	if (new_status != D_UNKNOWN && new_status != d->status) {
+		if (D_WAITING == abs(d->status))
 			queue_changed();
 
 		--global.num_perstatus[abs(d->status)];
@@ -638,19 +654,19 @@ notification_handler(char const *method, struct json_node const *event)
 void
 on_ws_message(char *msg, uint64_t msglen)
 {
-	static struct json_node *nodes;
+	static JSONNode *nodes;
 	static size_t num_nodes;
 
-	struct json_node const *id;
-	struct json_node const *method;
+	JSONNode const *id;
+	JSONNode const *method;
 
 	(void)msglen;
 
 	json_parse(msg, &nodes, &num_nodes);
 
 	if ((id = json_get(nodes, "id"))) {
-		struct json_node const *const result = json_get(nodes, "result");
-		struct rpc_request *const rpc = &rpc_requests[(unsigned)id->val.num];
+		JSONNode const *const result = json_get(nodes, "result");
+		RPCRequest *const rpc = &rpc_requests[(unsigned)id->val.num];
 
 		if (!result)
 			error_handler(json_get(nodes, "error"));
@@ -666,7 +682,7 @@ on_ws_message(char *msg, uint64_t msglen)
 		}
 
 	} else if ((method = json_get(nodes, "method"))) {
-		struct json_node const *const params = json_get(nodes, "params");
+		JSONNode const *const params = json_get(nodes, "params");
 
 		notification_handler(method->val.str, params + 1);
 	} else {
@@ -674,10 +690,10 @@ on_ws_message(char *msg, uint64_t msglen)
 	}
 }
 
-static struct rpc_request *
+static RPCRequest *
 new_rpc(void)
 {
-	struct rpc_request *rpc;
+	RPCRequest *rpc;
 
 	for (uint8_t i = 0; i < ARRAY_SIZE(rpc_requests); ++i) {
 		rpc = &rpc_requests[i];
@@ -710,7 +726,7 @@ static void
 clear_rpc_requests(void)
 {
 	for (uint8_t n = ARRAY_SIZE(rpc_requests); 0 < n;) {
-		struct rpc_request *rpc = &rpc_requests[--n];
+		RPCRequest *rpc = &rpc_requests[--n];
 
 		if (rpc->handler) {
 			rpc->handler(NULL, rpc->arg);
@@ -720,10 +736,10 @@ clear_rpc_requests(void)
 }
 
 static void
-fetch_options(struct download *d, bool user);
+fetch_options(Download *d, bool user);
 
 static void
-parse_session_info(struct json_node const *result)
+parse_session_info(JSONNode const *result)
 {
 	char *tmpdir;
 
@@ -736,7 +752,7 @@ parse_session_info(struct json_node const *result)
 }
 
 static bool
-do_rpc(struct rpc_request *rpc)
+do_rpc(RPCRequest *rpc)
 {
 	json_write_endobj(jw);
 	if (-1 == ws_write(jw->buf, jw->len)) {
@@ -750,7 +766,7 @@ do_rpc(struct rpc_request *rpc)
 }
 
 static void
-update_download_tags(struct download *d)
+update_download_tags(Download *d)
 {
 	ssize_t size;
 	char *p;
@@ -799,11 +815,11 @@ changed:
 	}
 }
 
-static struct uri *
-find_file_uri(struct file const *f, char const *uri)
+static URI *
+find_file_uri(File const *f, char const *uri)
 {
 	for (uint32_t i = 0; i < f->num_uris; ++i) {
-		struct uri *u = &f->uris[i];
+		URI *u = &f->uris[i];
 
 		if (0 == strcmp(u->uri, uri))
 			return u;
@@ -813,7 +829,7 @@ find_file_uri(struct file const *f, char const *uri)
 }
 
 static void
-uri_addserver(struct uri *u, struct server *s)
+uri_addserver(URI *u, Server *s)
 {
 	void *p;
 
@@ -823,12 +839,12 @@ uri_addserver(struct uri *u, struct server *s)
 }
 
 static void
-parse_file_servers(struct file *f, struct json_node const *node)
+parse_file_servers(File *f, JSONNode const *node)
 {
 	for (node = json_first(node); node; node = json_next(node)) {
-		struct json_node const *field = json_children(node);
-		struct uri *u = u;
-		struct server s;
+		JSONNode const *field = json_children(node);
+		URI *u = u;
+		Server s;
 
 		do {
 			if (0 == strcmp(field->key, "uri")) {
@@ -850,7 +866,7 @@ parse_file_servers(struct file *f, struct json_node const *node)
 }
 
 static void
-parse_peer_id(struct peer *p, char *peer_id)
+parse_peer_id(Peer *p, char *peer_id)
 {
 #define HEX2NR(ch) (uint8_t)(ch <= '9' ? ch - '0' : ch - 'A' + 10)
 
@@ -873,7 +889,7 @@ parse_peer_id(struct peer *p, char *peer_id)
 }
 
 static void
-draw_progress(struct download const *d, uint8_t const *progress, uint64_t offset, uint64_t end_offset)
+draw_progress(Download const *d, uint8_t const *progress, uint64_t offset, uint64_t end_offset)
 {
 	uint8_t const
 	SYMBOL_MAP[UINT8_MAX + 1] =
@@ -982,7 +998,7 @@ draw_progress(struct download const *d, uint8_t const *progress, uint64_t offset
 }
 
 static void
-parse_progress(struct download *d, uint8_t **progress, char const *bitfield)
+parse_progress(Download *d, uint8_t **progress, char const *bitfield)
 {
 #define PARSE_HEX(hex) ((hex) <= '9' ? (hex) - '0' : (hex) - 'a' + 10)
 	free(*progress);
@@ -1008,7 +1024,7 @@ parse_progress(struct download *d, uint8_t **progress, char const *bitfield)
 }
 
 static void
-parse_peer_bitfield(struct peer *p, char const *bitfield)
+parse_peer_bitfield(Peer *p, char const *bitfield)
 {
 	static uint8_t const HEX_POPCOUNT[] = {
 		0, 1, 1, 2, 1, 2, 2, 3,
@@ -1024,9 +1040,9 @@ parse_peer_bitfield(struct peer *p, char const *bitfield)
 }
 
 static void
-parse_peer(struct download *d, struct peer *p, struct json_node const *node)
+parse_peer(Download *d, Peer *p, JSONNode const *node)
 {
-	struct json_node const *field = json_children(node);
+	JSONNode const *field = json_children(node);
 
 	p->progress = NULL;
 
@@ -1073,10 +1089,10 @@ parse_peer(struct download *d, struct peer *p, struct json_node const *node)
 }
 
 static void
-parse_peers(struct download *d, struct json_node const *node)
+parse_peers(Download *d, JSONNode const *node)
 {
 	uint32_t const num_oldpeers = d->num_peers;
-	struct peer *const oldpeers = d->peers;
+	Peer *const oldpeers = d->peers;
 
 	d->num_peers = json_len(node);
 	if (!(d->peers = malloc(d->num_peers * sizeof *(d->peers))))
@@ -1095,10 +1111,10 @@ parse_peers(struct download *d, struct json_node const *node)
 		&now
 	);
 
-	struct peer *p = d->peers;
+	Peer *p = d->peers;
 	node = json_children(node);
 	do {
-		struct peer *oldp;
+		Peer *oldp;
 		uint32_t j;
 
 		parse_peer(d, p, node);
@@ -1159,24 +1175,24 @@ free_oldpeers:
 }
 
 static void
-parse_servers(struct download *d, struct json_node const *node)
+parse_servers(Download *d, JSONNode const *node)
 {
 	if (!d->files)
 		return;
 
 	/* reset servers for every uri */
 	for (uint32_t i = 0; i < d->num_files; ++i) {
-		struct file *f = &d->files[i];
+		File *f = &d->files[i];
 
 		for (uint32_t j = 0; j < f->num_uris; ++j) {
-			struct uri *u = &f->uris[j];
+			URI *u = &f->uris[j];
 			u->num_servers = 0;
 		}
 	}
 
 	for (node = json_first(node); node; node = json_next(node)) {
-		struct json_node const *field = json_children(node);
-		struct json_node const *servers = servers;
+		JSONNode const *field = json_children(node);
+		JSONNode const *servers = servers;
 		uint32_t file_index = file_index;
 
 		do {
@@ -1192,10 +1208,10 @@ parse_servers(struct download *d, struct json_node const *node)
 
 	/* now deallocate server lists where num_servers == 0 */
 	for (uint32_t i = 0; i < d->num_files; ++i) {
-		struct file *f = &d->files[i];
+		File *f = &d->files[i];
 
 		for (uint32_t j = 0; j < f->num_uris; ++j) {
-			struct uri *u = &f->uris[j];
+			URI *u = &f->uris[j];
 			if (0 == u->num_servers)
 				free(u->servers), u->servers = NULL;
 		}
@@ -1204,7 +1220,7 @@ parse_servers(struct download *d, struct json_node const *node)
 }
 
 static void
-update_display_name(struct download *d)
+update_display_name(Download *d)
 {
 	if (d->name) {
 		d->display_name = d->name;
@@ -1212,7 +1228,7 @@ update_display_name(struct download *d)
 	}
 
 	if (d->num_files > 0 && d->files) {
-		struct file *f = &d->files[0];
+		File *f = &d->files[0];
 
 		if (f->path) {
 			d->display_name = f->path;
@@ -1223,7 +1239,7 @@ update_display_name(struct download *d)
 			uint32_t i;
 
 			for (i = 0; i < f->num_uris; ++i) {
-				if (f->uris[i].status == uri_status_used) {
+				if (f->uris[i].status == URI_STATUS_USED) {
 					assert(f->uris[i].uri);
 					d->display_name = f->uris[i].uri;
 					return;
@@ -1240,7 +1256,7 @@ update_display_name(struct download *d)
 }
 
 static void
-parse_download_files(struct download *d, struct json_node const *node)
+parse_download_files(Download *d, JSONNode const *node)
 {
 	free_files_of(d);
 
@@ -1250,8 +1266,8 @@ parse_download_files(struct download *d, struct json_node const *node)
 		return;
 
 	for (node = json_first(node); node; node = json_next(node)) {
-		struct json_node const *field = json_children(node);
-		struct file file;
+		JSONNode const *field = json_children(node);
+		File file;
 		int index = -1;
 
 		file.num_uris = 0;
@@ -1284,25 +1300,26 @@ parse_download_files(struct download *d, struct json_node const *node)
 				d->num_selfiles += file.selected;
 				break;
 
-			case K_file_uris: {
-				struct json_node const *uris;
+			case K_file_uris:
+			{
+				JSONNode const *uris;
 				uint32_t uri_index = 0;
 
 				file.num_uris = json_len(field);
 				file.uris = malloc(file.num_uris * sizeof *(file.uris));
 
 				for (uris = json_first(field); uris; uris = json_next(uris)) {
-					struct json_node const *field = json_children(uris);
-					struct uri u;
+					JSONNode const *field = json_children(uris);
+					URI u;
 
 					u.num_servers = 0;
 					u.servers = NULL;
 					do {
 						if (0 == strcmp(field->key, "status")) {
 							if (0 == strcmp(field->val.str, "used"))
-								u.status = uri_status_used;
+								u.status = URI_STATUS_USED;
 							else if (0 == strcmp(field->val.str, "waiting"))
-								u.status = uri_status_waiting;
+								u.status = URI_STATUS_WAITING;
 							else
 								assert(0);
 						} else if (0 == strcmp(field->key, "uri")) {
@@ -1344,7 +1361,7 @@ is_gid(char const *str)
 /* decide whether download |d| (:= *|dd|) should be shown. if not, remove |d|
  * and return false; otherwise return true. */
 static bool
-filter_download(struct download *d, struct download **dd)
+filter_download(Download *d, Download **dd)
 {
 	/* no --selects means all downloads */
 	if (0 == action.num_sel)
@@ -1366,7 +1383,7 @@ filter_download(struct download *d, struct download **dd)
 				return true;
 
 			for (size_t j = 0; j < d->num_files; ++j) {
-				struct file const *f = &d->files[j];
+				File const *f = &d->files[j];
 
 				if (f->path && 0 == strncmp(f->path, sel, sel_size))
 					return true;
@@ -1382,19 +1399,19 @@ filter_download(struct download *d, struct download **dd)
 }
 
 static void
-download_changed(struct download *d)
+download_changed(Download *d)
 {
 	update_display_name(d);
 	filter_download(d, NULL);
 }
 
 static void
-parse_download(struct download *d, struct json_node const *node)
+parse_download(Download *d, JSONNode const *node)
 {
 	/* only present if non-zero */
 	d->verified = 0;
 
-	for (struct json_node const *field = json_first(node);
+	for (JSONNode const *field = json_first(node);
 	     field;
 	     field = json_next(field))
 	{
@@ -1423,8 +1440,9 @@ parse_download(struct download *d, struct json_node const *node)
 				free(d->progress), d->progress = NULL;
 			break;
 
-		case K_download_bittorrent: {
-			struct json_node const *bt_info, *bt_name;
+		case K_download_bittorrent:
+		{
+			JSONNode const *bt_info, *bt_name;
 
 			free(d->name), d->name = NULL;
 
@@ -1434,21 +1452,22 @@ parse_download(struct download *d, struct json_node const *node)
 		}
 			break;
 
-		case K_download_status: {
+		case K_download_status:
+		{
 			static int8_t const STATUS_MAP[] = {
-				[K_status_none    ] = DOWNLOAD_UNKNOWN,
-				[K_status_active  ] = DOWNLOAD_ACTIVE,
-				[K_status_waiting ] = DOWNLOAD_WAITING,
-				[K_status_paused  ] = DOWNLOAD_PAUSED,
-				[K_status_error   ] = DOWNLOAD_ERROR,
-				[K_status_complete] = DOWNLOAD_COMPLETE,
-				[K_status_removed ] = DOWNLOAD_REMOVED
+				[K_status_none    ] = D_UNKNOWN,
+				[K_status_active  ] = D_ACTIVE,
+				[K_status_waiting ] = D_WAITING,
+				[K_status_paused  ] = D_PAUSED,
+				[K_status_error   ] = D_ERROR,
+				[K_status_complete] = D_COMPLETE,
+				[K_status_removed ] = D_REMOVED
 			};
 
 			int8_t const new_status = STATUS_MAP[K_status_parse(field->val.str)];
 
 			if (new_status != d->status) {
-				if (DOWNLOAD_WAITING == abs(d->status))
+				if (D_WAITING == abs(d->status))
 					queue_changed();
 
 				--global.num_perstatus[abs(d->status)];
@@ -1475,11 +1494,12 @@ parse_download(struct download *d, struct json_node const *node)
 			 * belonging to a different download... */
 			d->follows = true;
 			/* FALLTHROUGH */
-		case K_download_belongsTo: {
-			struct download **dd = get_download_by_gid(field->val.str);
+		case K_download_belongsTo:
+		{
+			Download **dd = get_download_by_gid(field->val.str);
 
 			if (dd) {
-				struct download *p = *dd;
+				Download *p = *dd;
 
 				d->parent = p;
 				if (!p->first_child) {
@@ -1537,14 +1557,14 @@ parse_download(struct download *d, struct json_node const *node)
 typedef void(*parse_options_cb)(char const *, char const *, void *);
 
 static void
-parse_options(struct json_node const *node, parse_options_cb cb, void *arg)
+parse_options(JSONNode const *node, parse_options_cb cb, void *arg)
 {
 	for (node = json_first(node); node; node = json_next(node))
 		cb(node->key, node->val.str, arg);
 }
 
 static void
-parse_global_stat(struct json_node const *node)
+parse_global_stat(JSONNode const *node)
 {
 	if (json_arr != json_type(node))
 		return;
@@ -1560,7 +1580,7 @@ parse_global_stat(struct json_node const *node)
 }
 
 static void
-parse_option(char const *option, char const *value, struct download *d)
+parse_option(char const *option, char const *value, Download *d)
 {
 	if (d) {
 		static locale_t cloc = (locale_t)0;
@@ -1631,7 +1651,7 @@ try_connect(void)
 }
 
 struct update_arg {
-	struct download *download;
+	Download *download;
 	bool has_get_peers: 1;
 	bool has_get_servers: 1;
 	bool has_get_options: 1;
@@ -1639,15 +1659,15 @@ struct update_arg {
 };
 
 static void
-parse_downloads(struct json_node const *result, struct update_arg *arg)
+parse_downloads(JSONNode const *result, struct update_arg *arg)
 {
 	bool some_insufficient = false;
 
-	for (struct download *d; result;
+	for (Download *d; result;
 	       result = json_next(result),
 	       unref_download(d), ++arg)
 	{
-		struct json_node const *node;
+		JSONNode const *node;
 
 		d = arg->download;
 
@@ -1663,7 +1683,7 @@ parse_downloads(struct json_node const *result, struct update_arg *arg)
 		}
 
 		if (json_obj == json_type(result)) {
-			struct download **dd;
+			Download **dd;
 
 			upgrade_download(d, &dd);
 			delete_download_at(dd);
@@ -1725,7 +1745,7 @@ set_periodic_update(void)
 }
 
 static void
-update_handler(struct json_node const *result, struct update_arg *arg)
+update_handler(JSONNode const *result, struct update_arg *arg)
 {
 	if (!result)
 		goto out;
@@ -1762,12 +1782,12 @@ update(void)
 	if (update != periodic)
 		return;
 
-	struct rpc_request *rpc;
+	RPCRequest *rpc;
 
 	if (!(rpc = new_rpc()))
 		return;
 
-	rpc->handler = (rpc_handler)update_handler;
+	rpc->handler = (RPCHandler)update_handler;
 
 	json_write_key(jw, "method");
 	json_write_str(jw, "system.multicall");
@@ -1790,10 +1810,10 @@ update(void)
 	}
 
 	if (0 < num_downloads) {
-		struct download **top;
-		struct download **bot;
-		struct download **end = &downloads[num_downloads];
-		struct download **dd = downloads;
+		Download **top;
+		Download **bot;
+		Download **end = &downloads[num_downloads];
+		Download **dd = downloads;
 		struct update_arg *arg;
 
 		if (VIEWS[1] == view) {
@@ -1813,7 +1833,7 @@ update(void)
 		rpc->arg = arg;
 
 		for (; dd < end; ++dd) {
-			struct download *d = *dd;
+			Download *d = *dd;
 			bool visible = top <= dd && dd <= bot;
 			uint8_t keyidx = 0;
 			char *keys[20];
@@ -1830,7 +1850,7 @@ update(void)
 
 				d->initialized = true;
 			} else {
-				if ((0 == d->num_files && (!d->name || (visible && DOWNLOAD_ACTIVE != d->status && is_local))) ||
+				if ((0 == d->num_files && (!d->name || (visible && D_ACTIVE != d->status && is_local))) ||
 				    (visible && 'f' == view))
 				{
 					WANT("files");
@@ -1850,11 +1870,11 @@ update(void)
 				if (is_local)
 					WANT("bitfield");
 
-				if (-DOWNLOAD_ERROR == d->status)
+				if (-D_ERROR == d->status)
 					WANT("errorMessage");
-			} else if (DOWNLOAD_UNKNOWN == d->status) {
+			} else if (D_UNKNOWN == d->status) {
 				WANT("status");
-			} else if (DOWNLOAD_ACTIVE == d->status) {
+			} else if (D_ACTIVE == d->status) {
 				if (0 < d->download_speed ||
 				    (global.download_speed != global.download_speed_total &&
 				     d->have != d->total))
@@ -1911,7 +1931,7 @@ update(void)
 			arg->has_get_peers = 0;
 			arg->has_get_servers = 0;
 			if (visible &&
-			    (DOWNLOAD_ACTIVE == abs(d->status) || d->status < 0) &&
+			    (D_ACTIVE == abs(d->status) || d->status < 0) &&
 			    (d->name
 			    ? (arg->has_get_peers = ('p' == view))
 			    : (arg->has_get_servers = ('f' == view)))) {
@@ -1944,7 +1964,7 @@ update(void)
 				d->requested_options = true;
 			}
 
-			if ((arg->has_get_position = (-DOWNLOAD_WAITING == d->status))) {
+			if ((arg->has_get_position = (-D_WAITING == d->status))) {
 				json_write_beginobj(jw);
 				json_write_key(jw, "methodName");
 				json_write_str(jw, "aria2.changePosition");
@@ -1979,7 +1999,7 @@ update(void)
 
 
 static void
-change_position_handler(struct json_node const *result, struct download *d)
+change_position_handler(JSONNode const *result, Download *d)
 {
 	if (result) {
 		queue_changed();
@@ -1994,14 +2014,14 @@ change_position_handler(struct json_node const *result, struct download *d)
 }
 
 static void
-change_position(struct download *d, int32_t pos, int whence)
+change_position(Download *d, int32_t pos, int whence)
 {
-	struct rpc_request *rpc;
+	RPCRequest *rpc;
 
 	if (!(rpc = new_rpc()))
 		return;
 
-	rpc->handler = (rpc_handler)change_position_handler;
+	rpc->handler = (RPCHandler)change_position_handler;
 	rpc->arg = ref_download(d);
 
 	json_write_key(jw, "method");
@@ -2031,7 +2051,7 @@ change_position(struct download *d, int32_t pos, int whence)
 }
 
 static void
-shutdown_handler(struct json_node const *result, struct update_arg *arg)
+shutdown_handler(JSONNode const *result, struct update_arg *arg)
 {
 	(void)arg;
 
@@ -2044,12 +2064,12 @@ shutdown_handler(struct json_node const *result, struct update_arg *arg)
 static void
 shutdown_aria(int force)
 {
-	struct rpc_request *rpc;
+	RPCRequest *rpc;
 
 	if (!(rpc = new_rpc()))
 		return;
 
-	rpc->handler = (rpc_handler)shutdown_handler;
+	rpc->handler = (RPCHandler)shutdown_handler;
 
 	json_write_key(jw, "method");
 	json_write_str(jw, force ? "aria2.forceShutdown" : "aria2.shutdown");
@@ -2064,21 +2084,21 @@ shutdown_aria(int force)
 }
 
 static void
-action_exit(struct json_node const *result, void *arg)
+action_exit(JSONNode const *result, void *arg)
 {
 	(void)result, (void)arg;
 	exit(EXIT_SUCCESS);
 }
 
 static void
-pause_download(struct download *d, bool pause, bool force)
+pause_download(Download *d, bool pause, bool force)
 {
-	struct rpc_request *rpc;
+	RPCRequest *rpc;
 
 	if (!(rpc = new_rpc()))
 		return;
 
-	if (act_visual != action.kind)
+	if (ACT_VISUAL != action.kind)
 		rpc->handler = action_exit;
 
 	if (0 == action.num_sel || d) {
@@ -2101,8 +2121,8 @@ pause_download(struct download *d, bool pause, bool force)
 
 		json_write_endarr(jw);
 	} else {
-		struct download **dd = downloads;
-		struct download **const end = &downloads[num_downloads];
+		Download **dd = downloads;
+		Download **const end = &downloads[num_downloads];
 
 		json_write_key(jw, "method");
 		json_write_str(jw, "system.multicall");
@@ -2136,22 +2156,22 @@ pause_download(struct download *d, bool pause, bool force)
 }
 
 static void
-purge_download_handler(struct json_node const *result, struct download *d)
+purge_download_handler(JSONNode const *result, Download *d)
 {
 	if (result) {
-		struct download **dd;
+		Download **dd;
 
 		if (d) {
 			if (upgrade_download(d, &dd))
 				delete_download_at(dd);
 		} else {
-			struct download **end = &downloads[num_downloads];
+			Download **end = &downloads[num_downloads];
 
 			for (dd = downloads; dd < end;) {
 				switch (abs((*dd)->status)) {
-				case DOWNLOAD_COMPLETE:
-				case DOWNLOAD_ERROR:
-				case DOWNLOAD_REMOVED:
+				case D_COMPLETE:
+				case D_ERROR:
+				case D_REMOVED:
 					delete_download_at(dd);
 					--end;
 					break;
@@ -2170,14 +2190,14 @@ purge_download_handler(struct json_node const *result, struct download *d)
 }
 
 static void
-purge_download(struct download *d)
+purge_download(Download *d)
 {
-	struct rpc_request *rpc;
+	RPCRequest *rpc;
 
 	if (!(rpc = new_rpc()))
 		return;
 
-	rpc->handler = (rpc_handler)purge_download_handler;
+	rpc->handler = (RPCHandler)purge_download_handler;
 	rpc->arg = ref_download(d);
 
 	json_write_key(jw, "method");
@@ -2219,9 +2239,9 @@ draw_main(void)
 }
 
 static void
-draw_peer(struct download const *d, size_t i, int *y)
+draw_peer(Download const *d, size_t i, int *y)
 {
-	struct peer const *p = &d->peers[i];
+	Peer const *p = &d->peers[i];
 	char fmtbuf[5];
 	int n;
 	int x, width = COLS;
@@ -2275,11 +2295,11 @@ draw_peer(struct download const *d, size_t i, int *y)
 }
 
 static void
-draw_our_peer(struct download const *d, int *y)
+draw_our_peer(Download const *d, int *y)
 {
 	mvprintw((*y)++, 0, "  %*.*s%*.s", -sizeof global.external_ip, sizeof global.external_ip, global.external_ip, 6 + PEER_INFO_WIDTH, "");
 #if 0
-	struct download D = {
+	Download D = {
 		.num_pieces = 8,
 		.piece_size = 1000
 	};
@@ -2293,7 +2313,7 @@ static void
 draw_peers(void)
 {
 	if (0 < num_downloads) {
-		struct download *d = downloads[selidx];
+		Download *d = downloads[selidx];
 		int y = 0;
 
 		draw_download(d, false, &y);
@@ -2318,9 +2338,9 @@ draw_peers(void)
 }
 
 static void
-draw_file(struct download const *d, size_t i, int *y, uint64_t offset)
+draw_file(Download const *d, size_t i, int *y, uint64_t offset)
 {
-	struct file const *f = &d->files[i];
+	File const *f = &d->files[i];
 	char szhave[6];
 	char sztotal[6];
 	char szpercent[6];
@@ -2374,20 +2394,20 @@ draw_file(struct download const *d, size_t i, int *y, uint64_t offset)
 	}
 
 	for (j = 0; j < f->num_uris; ++j) {
-		struct uri const *u = &f->uris[j];
+		URI const *u = &f->uris[j];
 
 		attr_set(A_NORMAL, 0, NULL);
 		mvprintw((*y)++, 0, "       %s╴",
 		         j + 1 < f->num_uris ? "├" : "└");
 
-		attr_set(u->status == uri_status_used ? A_BOLD : A_NORMAL, 0, NULL);
-		printw("%3d%s ", j + 1, u->status == uri_status_used ? "*" : " ");
+		attr_set(u->status == URI_STATUS_USED ? A_BOLD : A_NORMAL, 0, NULL);
+		printw("%3d%s ", j + 1, u->status == URI_STATUS_USED ? "*" : " ");
 		attr_set(A_NORMAL, 0, NULL);
 		addstr(u->uri);
 		clrtoeol();
 
 		for (uint32_t k = 0; k < u->num_servers; ++k) {
-			struct server const *s = &u->servers[k];
+			Server const *s = &u->servers[k];
 			char fmtbuf[5];
 			int n;
 
@@ -2411,7 +2431,7 @@ static void
 draw_files(void)
 {
 	if (0 < num_downloads) {
-		struct download *d = downloads[selidx];
+		Download *d = downloads[selidx];
 		int y = 0;
 
 		draw_download(d, false, &y);
@@ -2443,19 +2463,19 @@ draw_files(void)
 }
 
 static int
-downloadcmp(struct download const **pthis, struct download const **pother, void *arg);
+downloadcmp(Download const **pthis, Download const **pother, void *arg);
 
 /* XXX: Cache value? */
-static struct download const *
-downloadtreebest(struct download const *tree)
+static Download const *
+downloadtreebest(Download const *tree)
 {
-	struct download const *best = tree;
-	struct download const *sibling;
+	Download const *best = tree;
+	Download const *sibling;
 
 	for (sibling = best->first_child;
 	     sibling;
 	     sibling = sibling->next_sibling) {
-		struct download const *treebest = downloadtreebest(sibling);
+		Download const *treebest = downloadtreebest(sibling);
 		if (downloadcmp(&best, &treebest, (void *)1) > 0)
 			best = treebest;
 	}
@@ -2464,20 +2484,20 @@ downloadtreebest(struct download const *tree)
 }
 
 static int
-downloadcmp(struct download const **pthis, struct download const **pother, void *arg)
+downloadcmp(Download const **pthis, Download const **pother, void *arg)
 {
 	int cmp;
 	uint64_t x, y;
-	struct download const *this = *pthis;
-	struct download const *other = *pother;
+	Download const *this = *pthis;
+	Download const *other = *pother;
 	int8_t this_status, other_status;
 
 	if (!arg) {
-	/* if ((this_status == DOWNLOAD_PAUSED || other_status == DOWNLOAD_PAUSED) &&
-	    (this_status == DOWNLOAD_COMPLETE || other_status == DOWNLOAD_COMPLETE))
+	/* if ((this_status == D_PAUSED || other_status == D_PAUSED) &&
+	    (this_status == D_COMPLETE || other_status == D_COMPLETE))
 		__asm__("int3"); */
 		for (;; this = this->parent) {
-			struct download const *p = other;
+			Download const *p = other;
 
 			do {
 				if (p == this->parent)
@@ -2504,11 +2524,11 @@ downloadcmp(struct download const **pthis, struct download const **pother, void 
 	if (cmp)
 		return cmp;
 
-	if (DOWNLOAD_WAITING == this_status)
+	if (D_WAITING == this_status)
 		/* sort by position in queue */
 		return other->queue_index - this->queue_index;
 
-	if (DOWNLOAD_ACTIVE == this_status) {
+	if (D_ACTIVE == this_status) {
 		/* prefer not stalled downloads */
 		cmp = (0 < other->download_speed) - (0 < this->download_speed);
 		if (cmp)
@@ -2533,7 +2553,7 @@ downloadcmp(struct download const **pthis, struct download const **pother, void 
 	if (x != y)
 		return x > y ? -1 : 1;
 
-	if (DOWNLOAD_ACTIVE == this_status) {
+	if (D_ACTIVE == this_status) {
 		/* prefer higher upload speed */
 		if (this->upload_speed != other->upload_speed)
 			return this->upload_speed > other->upload_speed ? -1 : 1;
@@ -2560,7 +2580,7 @@ downloadcmp(struct download const **pthis, struct download const **pother, void 
 
 /* draw download d at screen line y */
 static void
-draw_download(struct download const *d, bool draw_parents, int *y)
+draw_download(Download const *d, bool draw_parents, int *y)
 {
 	char fmtbuf[5];
 	int n;
@@ -2573,11 +2593,11 @@ draw_download(struct download const *d, bool draw_parents, int *y)
 
 	attr_set(A_BOLD, -1, NULL);
 	switch (abs(d->status)) {
-	case DOWNLOAD_UNKNOWN:
+	case D_UNKNOWN:
 		addstr("? ");
 		goto fill_spaces;
 
-	case DOWNLOAD_REMOVED:
+	case D_REMOVED:
 		addstr("- ");
 
 	fill_spaces:
@@ -2587,7 +2607,8 @@ draw_download(struct download const *d, bool draw_parents, int *y)
 			(0 < global.num_upload_limited ? 6 : 0));
 		break;
 
-	case DOWNLOAD_ERROR: {
+	case D_ERROR:
+	{
 		int const usable_width =
 			29 +
 			(!d->tags ? tag_col_width : 0) +
@@ -2604,7 +2625,7 @@ draw_download(struct download const *d, bool draw_parents, int *y)
 	}
 		break;
 
-	case DOWNLOAD_WAITING:
+	case D_WAITING:
 		printw("%-11d", d->queue_index);
 
 		attr_set(A_NORMAL, 0, NULL);
@@ -2618,7 +2639,7 @@ draw_download(struct download const *d, bool draw_parents, int *y)
 
 		goto print_files;
 
-	case DOWNLOAD_PAUSED:
+	case D_PAUSED:
 		addstr("|  ");
 		attr_set(A_NORMAL, 0, NULL);
 
@@ -2657,7 +2678,7 @@ draw_download(struct download const *d, bool draw_parents, int *y)
 			addspaces(6);
 		break;
 
-	case DOWNLOAD_COMPLETE:
+	case D_COMPLETE:
 		attr_set(A_NORMAL, 0, NULL);
 
 		addspaces(10);
@@ -2677,7 +2698,7 @@ draw_download(struct download const *d, bool draw_parents, int *y)
 			addspaces(6);
 		break;
 
-	case DOWNLOAD_ACTIVE:
+	case D_ACTIVE:
 		addstr(d->verified == 0 ? "> " : "v ");
 		attr_set(A_NORMAL, 0, NULL);
 
@@ -2828,7 +2849,7 @@ skip_tags:
 	addstr(" ");
 	namex = x = curx = getcurx(stdscr);
 	if (draw_parents && d->parent) {
-		struct download const *parent;
+		Download const *parent;
 
 		for (parent = d; parent->parent; parent = parent->parent)
 			x += 2;
@@ -2849,7 +2870,7 @@ skip_tags:
 	++*y;
 
 	switch (abs(d->status)) {
-	case DOWNLOAD_ERROR:
+	case D_ERROR:
 		if (view != VIEWS[1] && d->error_message && strlen(d->error_message) > 30) {
 			attr_set(A_BOLD, COLOR_ERR, NULL);
 			mvaddstr(*y, 0, "  ");
@@ -2892,7 +2913,7 @@ on_downloads_change(bool stickycurs)
 {
 	/* re-sort downloads list */
 	if (0 < num_downloads) {
-		char selgid[sizeof ((struct download *)0)->gid];
+		char selgid[sizeof ((Download *)0)->gid];
 
 		if (selidx < 0)
 			selidx = 0;
@@ -2941,7 +2962,7 @@ draw_cursor(void)
 	if (selidx < 0)
 		selidx = 0;
 
-	if (oldtopidx == topidx) {
+	if (tui.topidx == topidx) {
 		/* selection changed */
 		if (selidx < topidx)
 			topidx = selidx;
@@ -2960,17 +2981,17 @@ draw_cursor(void)
 			selidx = topidx + (height - 1);
 	}
 
-	if (oldtopidx == topidx) {
+	if (tui.topidx == topidx) {
 		move(VIEWS[1] == view ? selidx - topidx : 0, curx);
 	} else {
-		oldtopidx = topidx;
+		tui.topidx = topidx;
 		on_scroll_changed();
 		/* update now seen downloads */
 		update();
 	}
 
-	if (oldselidx != selidx) {
-		oldselidx = selidx;
+	if (tui.selidx != selidx) {
+		tui.selidx = selidx;
 		draw_statusline();
 	}
 }
@@ -3030,16 +3051,16 @@ draw_statusline(void)
 			view,
 			0 < num_downloads ? selidx + 1 : 0, num_downloads);
 
-	for (i = DOWNLOAD_UNKNOWN; i < DOWNLOAD_COUNT; ++i) {
+	for (i = D_UNKNOWN; i < D_NB; ++i) {
 		if (0 == global.num_perstatus[i])
 			continue;
 
 		addstr(first ? " (" : " ");
 		first = false;
 
-		attr_set(A_BOLD, i == DOWNLOAD_ERROR ? COLOR_ERR : 0, NULL);
+		attr_set(A_BOLD, i == D_ERROR ? COLOR_ERR : 0, NULL);
 		addnstr(DOWNLOAD_SYMBOLS + i, 1);
-		attr_set(A_NORMAL, i == DOWNLOAD_ERROR ? COLOR_ERR : 0, NULL);
+		attr_set(A_NORMAL, i == D_ERROR ? COLOR_ERR : 0, NULL);
 		printw("%d", global.num_perstatus[i]);
 		attr_set(A_NORMAL, 0, NULL);
 	}
@@ -3136,23 +3157,23 @@ draw_all(void)
 }
 
 static void
-print_gid(struct download const *d)
+print_gid(Download const *d)
 {
 	fprintf(stdout, "%s\n", d->gid);
 }
 
 static void
-foreach_download(void(*cb)(struct download const *))
+foreach_download(void(*cb)(Download const *))
 {
-	struct download **dd = downloads;
-	struct download **const end = &downloads[num_downloads];
+	Download **dd = downloads;
+	Download **const end = &downloads[num_downloads];
 
 	for (dd = downloads; dd < end; ++dd)
 		cb(*dd);
 }
 
 static void
-update_all_handler(struct json_node const *result, void *arg)
+update_all_handler(JSONNode const *result, void *arg)
 {
 	size_t download_index = 0;
 
@@ -3168,8 +3189,8 @@ update_all_handler(struct json_node const *result, void *arg)
 
 	result = json_next(result);
 	do {
-		struct json_node const *downloads_list;
-		struct json_node const *node;
+		JSONNode const *downloads_list;
+		JSONNode const *node;
 
 		if (json_arr != json_type(result)) {
 			error_handler(result);
@@ -3179,11 +3200,11 @@ update_all_handler(struct json_node const *result, void *arg)
 		downloads_list = json_children(result);
 
 		for (node = json_first(downloads_list); node; node = json_next(node)) {
-			struct download *d;
+			Download *d;
 			/* XXX: parse_download's belongsTo and followedBy may
 			 * create the download before this update arrives, so
 			 * we check if only we modified the list */
-			struct download **dd = download_index == num_downloads
+			Download **dd = download_index == num_downloads
 				? new_download()
 				: get_download_by_gid(json_get(node, "gid")->val.str);
 			if (!dd)
@@ -3203,31 +3224,31 @@ update_all_handler(struct json_node const *result, void *arg)
 	} while ((result = json_next(result)));
 
 	switch (action.kind) {
-	case act_visual:
+	case ACT_VISUAL:
 		/* no-op */
 		break;
 
-	case act_add_downloads:
-	case act_shutdown:
+	case ACT_ADD_DOWNLOADS:
+	case ACT_SHUTDOWN:
 		/* handled earlier */
 		break;
 
-	case act_print_gid:
+	case ACT_PRINT_GID:
 		foreach_download(print_gid);
 		exit(EXIT_SUCCESS);
 		break;
 
-	case act_pause:
-	case act_unpause:
-		pause_download(NULL, act_pause == action.kind, do_forced);
+	case ACT_PAUSE:
+	case ACT_UNPAUSE:
+		pause_download(NULL, ACT_PAUSE == action.kind, do_forced);
 		break;
 
-	case act_purge:
+	case ACT_PURGE:
 		purge_download(NULL);
 		break;
 	}
 
-	if (act_visual == action.kind) {
+	if (ACT_VISUAL == action.kind) {
 		on_downloads_change(0);
 		refresh();
 
@@ -3238,7 +3259,7 @@ update_all_handler(struct json_node const *result, void *arg)
 }
 
 static void
-runaction_maychanged(struct download *d)
+runaction_maychanged(Download *d)
 {
 	if (d) {
 		update_download_tags(d);
@@ -3269,9 +3290,9 @@ begwin(void)
  * - =0: action executed and terminated successfully.
  * - >0: action executed but failed. */
 static int
-run_action(struct download *d, char const *name, ...)
+run_action(Download *d, char const *name, ...)
 {
-	char filename[PATH_MAX];
+	char filename[NAME_MAX];
 	char filepath[PATH_MAX];
 	va_list argptr;
 	pid_t pid;
@@ -3390,7 +3411,7 @@ write_option(char const *option, char const *value, FILE *file)
 }
 
 static void
-fetch_options_handler(struct json_node const *result, struct download *d)
+fetch_options_handler(JSONNode const *result, Download *d)
 {
 	if (result) {
 		clear_error_message();
@@ -3407,7 +3428,7 @@ fetch_options_handler(struct json_node const *result, struct download *d)
 }
 
 static void
-change_option_handler(struct json_node const *result, struct download *d)
+change_option_handler(JSONNode const *result, Download *d)
 {
 	if (result)
 		fetch_options(d, false);
@@ -3417,13 +3438,13 @@ change_option_handler(struct json_node const *result, struct download *d)
 
 /* show received download or global options to user */
 static void
-show_options_handler(struct json_node const *result, struct download *d)
+show_options_handler(JSONNode const *result, Download *d)
 {
 	FILE *f;
 	ssize_t len;
 	char *line;
 	size_t linesiz;
-	struct rpc_request *rpc;
+	RPCRequest *rpc;
 	int action;
 
 	if (!result)
@@ -3454,7 +3475,7 @@ show_options_handler(struct json_node const *result, struct download *d)
 	if (!(rpc = new_rpc()))
 		goto out_fclose;
 
-	rpc->handler = (rpc_handler)change_option_handler;
+	rpc->handler = (RPCHandler)change_option_handler;
 	rpc->arg = ref_download(d);
 
 	json_write_key(jw, "method");
@@ -3503,14 +3524,14 @@ out:
 /* if user requested it, show it. otherwise just update returned values in the
  * background */
 static void
-fetch_options(struct download *d, bool user)
+fetch_options(Download *d, bool user)
 {
-	struct rpc_request *rpc;
+	RPCRequest *rpc;
 
 	if (!(rpc = new_rpc()))
 		return;
 
-	rpc->handler = (rpc_handler)(user ? show_options_handler : fetch_options_handler);
+	rpc->handler = (RPCHandler)(user ? show_options_handler : fetch_options_handler);
 	rpc->arg = ref_download(d);
 
 	json_write_key(jw, "method");
@@ -3530,14 +3551,14 @@ fetch_options(struct download *d, bool user)
 }
 
 static void
-show_options(struct download *d)
+show_options(Download *d)
 {
 	fetch_options(d, true);
 }
 
 /* select (last) newly added download and write back errorneous files */
 static void
-add_downloads_handler(struct json_node const *result, void *arg)
+add_downloads_handler(JSONNode const *result, void *arg)
 {
 	bool ok = true;
 
@@ -3547,13 +3568,13 @@ add_downloads_handler(struct json_node const *result, void *arg)
 		return;
 
 	for (result = json_first(result); result; result = json_next(result)) {
-		struct download **dd;
+		Download **dd;
 
 		if (json_obj == json_type(result)) {
 			ok = false;
 			error_handler(result);
 		} else {
-			struct json_node const *gid = json_children(result);
+			JSONNode const *gid = json_children(result);
 
 			if (json_str == json_type(gid)) {
 				/* single GID returned */
@@ -3568,11 +3589,11 @@ add_downloads_handler(struct json_node const *result, void *arg)
 	}
 
 	switch (action.kind) {
-	case act_add_downloads:
+	case ACT_ADD_DOWNLOADS:
 		exit(ok ? EXIT_SUCCESS : EXIT_FAILURE);
 		break;
 
-	case act_visual:
+	case ACT_VISUAL:
 		on_downloads_change(1);
 		refresh();
 		break;
@@ -3586,7 +3607,7 @@ add_downloads_handler(struct json_node const *result, void *arg)
 static void
 add_downloads(char cmd)
 {
-	struct rpc_request *rpc;
+	RPCRequest *rpc;
 	FILE *f;
 	char *line;
 	size_t linesiz;
@@ -3611,7 +3632,7 @@ add_downloads(char cmd)
 	if (!(rpc = new_rpc()))
 		goto out_fclose;
 
-	rpc->handler = (rpc_handler)add_downloads_handler;
+	rpc->handler = (RPCHandler)add_downloads_handler;
 
 	json_write_key(jw, "method");
 	json_write_str(jw, "system.multicall");
@@ -3626,7 +3647,7 @@ next:
 	for (len = getline(&line, &linesiz, f); -1 != len;) {
 		char *uri, *next_uri;
 		char *b64str = NULL;
-		enum { kind_uri, kind_torrent, kind_metalink } kind;
+		enum { KIND_URI, KIND_TORRENT, KIND_METALINK } kind;
 
 		if (0 < len && line[len - 1] == '\n')
 			line[--len] = '\0';
@@ -3643,29 +3664,29 @@ next:
 		 0 == memcmp(uri + (size_t)len - ((sizeof lit) - 1), lit, (sizeof lit) - 1))
 
 		if (ISSUFFIX(".torrent"))
-			kind = kind_torrent;
+			kind = KIND_TORRENT;
 		else if (ISSUFFIX(".meta4") || ISSUFFIX(".metalink"))
-			kind = kind_metalink;
+			kind = KIND_METALINK;
 		else
-			kind = kind_uri;
+			kind = KIND_URI;
 
-		if (kind != kind_uri && !(b64str = file_b64_enc(uri)))
-			kind = kind_uri;
+		if (kind != KIND_URI && !(b64str = file_b64_enc(uri)))
+			kind = KIND_URI;
 #undef ISSUFFIX
 
 		json_write_beginobj(jw);
 
 		json_write_key(jw, "methodName");
 		switch (kind) {
-		case kind_torrent:
+		case KIND_TORRENT:
 			json_write_str(jw, "aria2.addTorrent");
 			break;
 
-		case kind_metalink:
+		case KIND_METALINK:
 			json_write_str(jw, "aria2.addMetalink");
 			break;
 
-		case kind_uri:
+		case KIND_URI:
 			json_write_str(jw, "aria2.addUri");
 			break;
 		}
@@ -3676,13 +3697,13 @@ next:
 		json_write_str(jw, secret_token);
 		/* “data” */
 		switch (kind) {
-		case kind_torrent:
-		case kind_metalink:
+		case KIND_TORRENT:
+		case KIND_METALINK:
 			json_write_str(jw, b64str);
 			free(b64str);
 			break;
 
-		case kind_uri:
+		case KIND_URI:
 			json_write_beginarr(jw);
 			for (;;) {
 				json_write_str(jw, uri);
@@ -3696,7 +3717,7 @@ next:
 			json_write_endarr(jw);
 			break;
 		}
-		if (kind_torrent == kind) {
+		if (KIND_TORRENT == kind) {
 			/* “uris” */
 			json_write_beginarr(jw);
 			while (next_uri) {
@@ -3761,7 +3782,7 @@ static void
 update_all(void)
 {
 	unsigned n;
-	struct rpc_request *rpc;
+	RPCRequest *rpc;
 
 	if (!(rpc = new_rpc()))
 		return;
@@ -3836,7 +3857,7 @@ update_all(void)
 		json_write_str(jw, "gid");
 		json_write_str(jw, "status");
 		json_write_str(jw, "errorMessage");
-		if (act_visual == action.kind) {
+		if (ACT_VISUAL == action.kind) {
 			json_write_str(jw, "totalLength");
 			json_write_str(jw, "completedLength");
 			json_write_str(jw, "uploadLength");
@@ -3851,7 +3872,7 @@ update_all(void)
 			json_write_str(jw, "following");
 			json_write_str(jw, "belongsTo");
 		}
-		if (act_visual == action.kind ? is_local : action.uses_files)
+		if (ACT_VISUAL == action.kind ? is_local : action.uses_files)
 			json_write_str(jw, "files");
 		json_write_endarr(jw);
 		/* }}} */
@@ -3868,10 +3889,10 @@ out_of_loop:
 }
 
 static void
-remove_download_handler(struct json_node const *result, struct download *d)
+remove_download_handler(JSONNode const *result, Download *d)
 {
 	if (result) {
-		struct download **dd;
+		Download **dd;
 
 		if (upgrade_download(d, &dd)) {
 			delete_download_at(dd);
@@ -3885,14 +3906,14 @@ remove_download_handler(struct json_node const *result, struct download *d)
 }
 
 static void
-remove_download(struct download *d, bool force)
+remove_download(Download *d, bool force)
 {
-	struct rpc_request *rpc;
+	RPCRequest *rpc;
 
 	if (0 <= run_action(d, "D"))
 		return;
 
-	if (DOWNLOAD_ACTIVE == abs(d->status)) {
+	if (D_ACTIVE == abs(d->status)) {
 		set_error_message("refusing to delete active download");
 		return;
 	}
@@ -3900,7 +3921,7 @@ remove_download(struct download *d, bool force)
 	if (!(rpc = new_rpc()))
 		return;
 
-	rpc->handler = (rpc_handler)remove_download_handler;
+	rpc->handler = (RPCHandler)remove_download_handler;
 	rpc->arg = ref_download(d);
 
 	json_write_key(jw, "method");
@@ -3922,7 +3943,7 @@ switch_view(int next)
 {
 	if (!(view = strchr(VIEWS + 1, view)[next ? 1 : -1])) {
 		view = VIEWS[next ? 1 : ARRAY_SIZE(VIEWS) - 2];
-		oldselidx = -1; /* force redraw */
+		tui.selidx = -1; /* force redraw */
 	}
 
 	update();
@@ -3931,9 +3952,9 @@ switch_view(int next)
 }
 
 static void
-select_download(struct download const *d)
+select_download(Download const *d)
 {
-	struct download **dd;
+	Download **dd;
 
 	if (d && upgrade_download(d, &dd)) {
 		selidx = dd - downloads;
@@ -3946,8 +3967,8 @@ static void
 jump_prev_group(void)
 {
 	if (0 < num_downloads) {
-		struct download **dd = &downloads[selidx];
-		struct download **lim = &downloads[0];
+		Download **dd = &downloads[selidx];
+		Download **lim = &downloads[0];
 		int8_t status = abs((*dd)->status);
 
 		while (lim <= --dd) {
@@ -3969,8 +3990,8 @@ static void
 jump_next_group(void)
 {
 	if (0 < num_downloads) {
-		struct download **dd = &downloads[selidx];
-		struct download **lim = &downloads[num_downloads];
+		Download **dd = &downloads[selidx];
+		Download **lim = &downloads[num_downloads];
 		int8_t status = abs((*dd)->status);
 
 		while (++dd < lim) {
@@ -4304,7 +4325,7 @@ read_stdin(void)
 		case CONTROL('['):
 			if (view != VIEWS[1]) {
 				view = VIEWS[1];
-				oldselidx = -1; /* force redraw */
+				tui.selidx = -1; /* force redraw */
 				draw_all();
 				refresh();
 				continue;
@@ -4338,7 +4359,7 @@ read_stdin(void)
 				goto default_action;
 			} else {
 				if (0 < num_downloads) {
-					struct download const *d = downloads[selidx];
+					Download const *d = downloads[selidx];
 					printf("%s\n", d->gid);
 				}
 
@@ -4362,7 +4383,7 @@ read_stdin(void)
 			/* try connect if not connected */
 			if (!ws_isalive())
 				try_connect();
-			action.kind = act_visual;
+			action.kind = ACT_VISUAL;
 			action.num_sel = 0;
 			update_all();
 			break;
@@ -4461,9 +4482,9 @@ cleanup_session_file(void)
 }
 
 static void
-remote_info_handler(struct json_node const *result, void *arg)
+remote_info_handler(JSONNode const *result, void *arg)
 {
-	struct json_node const *node;
+	JSONNode const *node;
 
 	(void)arg;
 
@@ -4481,11 +4502,11 @@ remote_info_handler(struct json_node const *result, void *arg)
 	/* we have is_local correctly set, so we can start requesting downloads */
 
 	switch (action.kind) {
-	case act_add_downloads:
+	case ACT_ADD_DOWNLOADS:
 		add_downloads('\0');
 		break;
 
-	case act_shutdown:
+	case ACT_SHUTDOWN:
 		shutdown_aria(do_forced);
 		break;
 
@@ -4498,7 +4519,7 @@ remote_info_handler(struct json_node const *result, void *arg)
 static void
 remote_info(void)
 {
-	struct rpc_request *rpc;
+	RPCRequest *rpc;
 
 	if (!(rpc = new_rpc()))
 		return;
@@ -4567,7 +4588,7 @@ on_ws_close(void)
 	if (0 == errno)
 		exit(EXIT_SUCCESS);
 
-	if (act_visual != action.kind)
+	if (ACT_VISUAL != action.kind)
 		exit(EXIT_FAILURE);
 
 	if (try_connect != periodic) {
@@ -4687,17 +4708,17 @@ main(int argc, char *argv[])
 			while (++argi, argv[argi] && '-' != *argv[argi])
 				++action.num_sel;
 		} else if (0 == strcmp(arg, "--print-gid")) {
-			action.kind = act_print_gid;
+			action.kind = ACT_PRINT_GID;
 		} else if (0 == strcmp(arg, "--add")) {
-			action.kind = act_add_downloads;
+			action.kind = ACT_ADD_DOWNLOADS;
 		} else if (0 == strcmp(arg, "--shutdown")) {
-			action.kind = act_shutdown;
+			action.kind = ACT_SHUTDOWN;
 		} else if (0 == strcmp(arg, "--pause")) {
-			action.kind = act_pause;
+			action.kind = ACT_PAUSE;
 		} else if (0 == strcmp(arg, "--unpause")) {
-			action.kind = act_unpause;
+			action.kind = ACT_UNPAUSE;
 		} else if (0 == strcmp(arg, "--purge")) {
-			action.kind = act_purge;
+			action.kind = ACT_PURGE;
 		} else if (0 == strcmp(arg, "--force")) {
 			do_forced = 1;
 		} else {
@@ -4715,7 +4736,7 @@ main(int argc, char *argv[])
 	/* atexit(clear_downloads); */
 	atexit(cleanup_session_file);
 
-	if (act_visual == action.kind) {
+	if (ACT_VISUAL == action.kind) {
 		pfds[0].fd = STDIN_FILENO;
 		pfds[0].events = POLLIN;
 
