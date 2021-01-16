@@ -249,6 +249,8 @@ static struct {
 	int selidx, topidx;
 } tui;
 
+static int oldidx;
+
 static struct json_writer jw[1];
 
 static void draw_statusline(void);
@@ -2926,8 +2928,10 @@ on_downloads_change(bool stickycurs)
 		qsort_r(downloads, num_downloads, sizeof *downloads, (int(*)(void const *, void const *, void*))downloadcmp, NULL);
 
 		/* move selection if download moved */
-		if (stickycurs && memcmp(selgid, downloads[selidx]->gid, sizeof selgid))
+		if (stickycurs && memcmp(selgid, downloads[selidx]->gid, sizeof selgid)) {
+			oldidx = selidx;
 			selidx = get_download_by_gid(selgid) - downloads;
+		}
 	}
 
 	/* then also update them on the screen */
@@ -4176,6 +4180,23 @@ read_stdin(void)
 
 		/*MAN(KEYS)
 		 * .TP
+		 * .B Ctrl-O
+		 * Jump to old position.
+		 * .IP
+		 * Old position is the place where download was before sorting.
+		 */
+		case CONTROL('O'):
+		{
+			int tmp = selidx;
+			selidx = oldidx;
+			oldidx = tmp;
+			draw_cursor();
+			refresh();
+		}
+			break;
+
+		/*MAN(KEYS)
+		 * .TP
 		 * .BR [
 		 * Select first download of the previous status group.
 		 */
@@ -4570,8 +4591,8 @@ on_ws_open(void)
 
 	clear_error_message();
 
-	oldselidx = -1;
-	oldtopidx = -1;
+	tui.selidx = -1;
+	tui.topidx = -1;
 
 	is_local = false;
 	remote_info();
