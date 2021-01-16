@@ -4277,14 +4277,14 @@ read_stdin(void)
 		 * Open
 		 * .I session file
 		 * for editing unless there are associated actions. Select lastly added download.
-		 * .sp
+		 * .IP
 		 * For the expected format refer to aria2's
 		 * .IR "Input File" .
 		 * Note that URIs that end with
 		 * .BR .torrent \ and\  .meta4 \ or\  .metalink
 		 * and refer to a readable file on the local filesystem, are got uploaded to
 		 * aria2 as a blob.
-		 * .sp
+		 * .IP
 		 * Insert downloads after the selection in the queue.
 		 */
 		case 'a':
@@ -4339,7 +4339,7 @@ read_stdin(void)
 
 		/*MAN(KEYS)
 		 * .TP
-		 * .B q
+		 * .BR q ,\  Esc
 		 * Go back to default view. On default view quit.
 		 */
 		case 'q':
@@ -4399,7 +4399,7 @@ read_stdin(void)
 			do_forced = 0;
 			break;
 
-		/* undocumented */
+		/* Undocumented. */
 		case CONTROL('L'):
 			/* try connect if not connected */
 			if (!ws_isalive())
@@ -4421,6 +4421,11 @@ read_stdin(void)
 			if (getmouse(&event) != OK)
 				break;
 
+			/*MAN(KEYS)
+			 * .TP
+			 * .B MouseScroll
+			 * Move selection.
+			 */
 #ifdef BUTTON5_PRESSED
 			if (event.bstate & BUTTON4_PRESSED)
 				selidx -= VIEWS[1] == view ? 5 : 1;
@@ -4428,6 +4433,11 @@ read_stdin(void)
 				selidx += VIEWS[1] == view ? 5 : 1;
 			else
 #endif
+			/*MAN(KEYS)
+			 * .TP
+			 * .B MouseDown
+			 * Select.
+			 */
 			if (((BUTTON1_PRESSED | BUTTON3_PRESSED) & event.bstate) &&
 			    VIEWS[1] == view &&
 			    event.y < getmainheight())
