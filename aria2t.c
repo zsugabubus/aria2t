@@ -626,7 +626,7 @@ notification_handler(char const *method, JSONNode const *event)
 		[K_notification_BtDownloadComplete] = D_ACTIVE
 	};
 
-	char *const gid = json_get(event, "gid")->val.str;
+	char const *const gid = json_get(event, "gid")->val.str;
 	Download **dd;
 	Download *d;
 
@@ -855,7 +855,7 @@ parse_file_servers(File *f, JSONNode const *node)
 			} else if (0 == strcmp(field->key, "downloadSpeed"))
 				s.download_speed = strtoul(field->val.str, NULL, 10);
 			else if (0 == strcmp(field->key, "currentUri"))
-				s.current_uri = field->val.str;
+				s.current_uri = (char *)field->val.str;
 		} while ((field = json_next(field)));
 
 		if (0 == strcmp(u->uri, s.current_uri))
@@ -868,11 +868,11 @@ parse_file_servers(File *f, JSONNode const *node)
 }
 
 static void
-parse_peer_id(Peer *p, char *peer_id)
+parse_peer_id(Peer *p, char const *peer_id)
 {
 #define HEX2NR(ch) (uint8_t)(ch <= '9' ? ch - '0' : ch - 'A' + 10)
 
-	char *src = peer_id;
+	char const *src = peer_id;
 	uint8_t *dst = p->peer_id;
 
 	for (; dst != p->peer_id + sizeof p->peer_id; ++dst) {
