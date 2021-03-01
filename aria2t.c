@@ -32,8 +32,6 @@
 
 #define XATTR_NAME "user.tags"
 
-typedef struct json_node JSONNode;
-
 #define addspaces(n) addnstr("                                          "/*31+5+6=42*/, n);
 
 enum {
@@ -251,7 +249,7 @@ static struct {
 
 static int oldidx;
 
-static struct json_writer jw[1];
+static JSONWriter jw[1];
 
 static void draw_statusline(void);
 static void draw_main(void);
@@ -570,10 +568,10 @@ error_handler(JSONNode const *error)
 	JSONNode const *message = json_get(error, "message");
 
 	if (ACT_VISUAL == action.kind) {
-		set_error_message("%s", message->val.str);
+		set_error_message("%s", message->str);
 		refresh();
 	} else {
-		fprintf(stderr, "%s\n", message->val.str);
+		fprintf(stderr, "%s\n", message->str);
 		exit(EXIT_FAILURE);
 	}
 }
@@ -626,7 +624,7 @@ notification_handler(char const *method, JSONNode const *event)
 		[K_notification_BtDownloadComplete] = D_ACTIVE
 	};
 
-	char const *const gid = json_get(event, "gid")->val.str;
+	char const *const gid = json_get(event, "gid")->str;
 	Download **dd;
 	Download *d;
 
@@ -664,11 +662,11 @@ on_ws_message(char *msg, uint64_t msglen)
 
 	(void)msglen;
 
-	json_parse(msg, &nodes, &num_nodes);
+	json_parse(msg, &nodes, &num_nodes, 0);
 
 	if ((id = json_get(nodes, "id"))) {
 		JSONNode const *const result = json_get(nodes, "result");
-		RPCRequest *const rpc = &rpc_requests[(unsigned)id->val.num];
+		RPCRequest *const rpc = &rpc_requests[(unsigned)id->num];
 
 		if (!result)
 			error_handler(json_get(nodes, "error"));
@@ -686,7 +684,7 @@ on_ws_message(char *msg, uint64_t msglen)
 	} else if ((method = json_get(nodes, "method"))) {
 		JSONNode const *const params = json_get(nodes, "params");
 
-		notification_handler(method->val.str, params + 1);
+		notification_handler(method->str, params + 1);
 	} else {
 		assert(0);
 	}
@@ -711,7 +709,7 @@ new_rpc(void)
 found:
 	rpc->handler = default_handler;
 
-	json_writer_empty(jw);
+	json_writer_reset(jw);
 	json_write_beginobj(jw);
 
 	json_write_key(jw, "jsonrpc");
@@ -750,14 +748,14 @@ parse_session_info(JSONNode const *result)
 
 	snprintf(session_file, sizeof session_file, "%s/aria2t.%s",
 			tmpdir,
-			json_get(result, "sessionId")->val.str);
+			json_get(result, "sessionId")->str);
 }
 
 static bool
 do_rpc(RPCRequest *rpc)
 {
 	json_write_endobj(jw);
-	if (-1 == ws_write(jw->buf, jw->len)) {
+	if (ws_write(jw->buf, jw->buf_size) < 0) {
 		set_error_message("write: %s", strerror(errno));
 		free_rpc(rpc);
 
@@ -850,12 +848,12 @@ parse_file_servers(File *f, JSONNode const *node)
 
 		do {
 			if (0 == strcmp(field->key, "uri")) {
-				u = find_file_uri(f, field->val.str);
+				u = find_file_uri(f, field->str);
 				assert(u);
 			} else if (0 == strcmp(field->key, "downloadSpeed"))
-				s.download_speed = strtoul(field->val.str, NULL, 10);
+				s.download_speed = strtoul(field->str, NULL, 10);
 			else if (0 == strcmp(field->key, "currentUri"))
-				s.current_uri = (char *)field->val.str;
+				s.current_uri = (char *)field->str;
 		} while ((field = json_next(field)));
 
 		if (0 == strcmp(u->uri, s.current_uri))
@@ -1055,36 +1053,36 @@ parse_peer(Download *d, Peer *p, JSONNode const *node)
 			break;
 
 		case K_peer_peerId:
-			parse_peer_id(p, field->val.str);
+			parse_peer_id(p, field->str);
 			break;
 
 		case K_peer_ip:
-			strncpy(p->ip, field->val.str, sizeof p->ip - 1);
+			strncpy(p->ip, field->str, sizeof p->ip - 1);
 			break;
 
 		case K_peer_port:
-			p->port = strtoul(field->val.str, NULL, 10);
+			p->port = strtoul(field->str, NULL, 10);
 			break;
 
 		case K_peer_bitfield:
-			parse_peer_bitfield(p, field->val.str);
-			parse_progress(d, &p->progress, field->val.str);
+			parse_peer_bitfield(p, field->str);
+			parse_progress(d, &p->progress, field->str);
 			break;
 
 		case K_peer_amChoking:
-			p->up_choked = IS_TRUE(field->val.str);
+			p->up_choked = IS_TRUE(field->str);
 			break;
 
 		case K_peer_peerChoking:
-			p->down_choked = IS_TRUE(field->val.str);
+			p->down_choked = IS_TRUE(field->str);
 			break;
 
 		case K_peer_downloadSpeed:
-			p->download_speed = strtoull(field->val.str, NULL, 10);
+			p->download_speed = strtoull(field->str, NULL, 10);
 			break;
 
 		case K_peer_uploadSpeed:
-			p->upload_speed = strtoull(field->val.str, NULL, 10);
+			p->upload_speed = strtoull(field->str, NULL, 10);
 			break;
 		}
 	} while ((field = json_next(field)));
@@ -1096,11 +1094,11 @@ parse_peers(Download *d, JSONNode const *node)
 	uint32_t const num_oldpeers = d->num_peers;
 	Peer *const oldpeers = d->peers;
 
-	d->num_peers = json_len(node);
+	d->num_peers = json_length(node);
 	if (!(d->peers = malloc(d->num_peers * sizeof *(d->peers))))
 		goto free_oldpeers;
 
-	if (json_isempty(node))
+	if (!json_length(node))
 		goto free_oldpeers;
 
 	struct timespec now;
@@ -1199,7 +1197,7 @@ parse_servers(Download *d, JSONNode const *node)
 
 		do {
 			if (0 == strcmp(field->key, "index"))
-				file_index = atoi(field->val.str) - 1;
+				file_index = atoi(field->str) - 1;
 			else if (0 == strcmp(field->key, "servers"))
 				servers = field;
 		} while ((field = json_next(field)));
@@ -1262,7 +1260,7 @@ parse_download_files(Download *d, JSONNode const *node)
 {
 	free_files_of(d);
 
-	d->num_files = json_len(node);
+	d->num_files = json_length(node);
 	d->num_selfiles = 0;
 	if (!(d->files = malloc(d->num_files * sizeof *(d->files))))
 		return;
@@ -1282,23 +1280,23 @@ parse_download_files(Download *d, JSONNode const *node)
 				break;
 
 			case K_file_index:
-				index = atoi(field->val.str) - 1;
+				index = atoi(field->str) - 1;
 				break;
 
 			case K_file_path:
-				file.path = strlen(field->val.str) > 0 ? strdup(field->val.str) : NULL;
+				file.path = strlen(field->str) > 0 ? strdup(field->str) : NULL;
 				break;
 
 			case K_file_length:
-				file.total = strtoull(field->val.str, NULL, 10);
+				file.total = strtoull(field->str, NULL, 10);
 				break;
 
 			case K_file_completedLength:
-				file.have = strtoull(field->val.str, NULL, 10);
+				file.have = strtoull(field->str, NULL, 10);
 				break;
 
 			case K_file_selected:
-				file.selected = IS_TRUE(field->val.str);
+				file.selected = IS_TRUE(field->str);
 				d->num_selfiles += file.selected;
 				break;
 
@@ -1307,7 +1305,7 @@ parse_download_files(Download *d, JSONNode const *node)
 				JSONNode const *uris;
 				uint32_t uri_index = 0;
 
-				file.num_uris = json_len(field);
+				file.num_uris = json_length(field);
 				file.uris = malloc(file.num_uris * sizeof *(file.uris));
 
 				for (uris = json_first(field); uris; uris = json_next(uris)) {
@@ -1318,15 +1316,15 @@ parse_download_files(Download *d, JSONNode const *node)
 					u.servers = NULL;
 					do {
 						if (0 == strcmp(field->key, "status")) {
-							if (0 == strcmp(field->val.str, "used"))
+							if (0 == strcmp(field->str, "used"))
 								u.status = URI_STATUS_USED;
-							else if (0 == strcmp(field->val.str, "waiting"))
+							else if (0 == strcmp(field->str, "waiting"))
 								u.status = URI_STATUS_WAITING;
 							else
 								assert(0);
 						} else if (0 == strcmp(field->key, "uri")) {
-							assert(field->val.str);
-							u.uri = strdup(field->val.str);
+							assert(field->str);
+							u.uri = strdup(field->str);
 						}
 					} while ((field = json_next(field)));
 					file.uris[uri_index++] = u;
@@ -1419,8 +1417,8 @@ parse_download(Download *d, JSONNode const *node)
 	{
 		switch (K_download_parse(field->key)) {
 		case K_download_gid:
-			assert(strlen(field->val.str) == sizeof d->gid - 1);
-			memcpy(d->gid, field->val.str, sizeof d->gid);
+			assert(strlen(field->str) == sizeof d->gid - 1);
+			memcpy(d->gid, field->str, sizeof d->gid);
 			break;
 
 		case K_download_files:
@@ -1428,16 +1426,16 @@ parse_download(Download *d, JSONNode const *node)
 			break;
 
 		case K_download_numPieces:
-			d->num_pieces = strtoul(field->val.str, NULL, 10);
+			d->num_pieces = strtoul(field->str, NULL, 10);
 			break;
 
 		case K_download_pieceLength:
-			d->piece_size = strtoul(field->val.str, NULL, 10);
+			d->piece_size = strtoul(field->str, NULL, 10);
 			break;
 
 		case K_download_bitfield:
 			if (d->have != d->total)
-				parse_progress(d, &d->progress, field->val.str);
+				parse_progress(d, &d->progress, field->str);
 			else
 				free(d->progress), d->progress = NULL;
 			break;
@@ -1450,7 +1448,7 @@ parse_download(Download *d, JSONNode const *node)
 
 			if ((bt_info = json_get(field, "info")) &&
 			    (bt_name = json_get(bt_info, "name")))
-				d->name = strdup(bt_name->val.str);
+				d->name = strdup(bt_name->str);
 		}
 			break;
 
@@ -1466,7 +1464,7 @@ parse_download(Download *d, JSONNode const *node)
 				[K_status_removed ] = D_REMOVED
 			};
 
-			int8_t const new_status = STATUS_MAP[K_status_parse(field->val.str)];
+			int8_t const new_status = STATUS_MAP[K_status_parse(field->str)];
 
 			if (new_status != d->status) {
 				if (D_WAITING == abs(d->status))
@@ -1481,13 +1479,13 @@ parse_download(Download *d, JSONNode const *node)
 
 		case K_download_completedLength:
 			global.have_total -= d->have;
-			d->have = strtoull(field->val.str, NULL, 10);
+			d->have = strtoull(field->str, NULL, 10);
 			global.have_total += d->have;
 			break;
 
 		case K_download_uploadLength:
 			global.uploaded_total -= d->uploaded;
-			d->uploaded = strtoull(field->val.str, NULL, 10);
+			d->uploaded = strtoull(field->str, NULL, 10);
 			global.uploaded_total += d->uploaded;
 			break;
 
@@ -1498,7 +1496,7 @@ parse_download(Download *d, JSONNode const *node)
 			/* FALLTHROUGH */
 		case K_download_belongsTo:
 		{
-			Download **dd = get_download_by_gid(field->val.str);
+			Download **dd = get_download_by_gid(field->str);
 
 			if (dd) {
 				Download *p = *dd;
@@ -1518,31 +1516,31 @@ parse_download(Download *d, JSONNode const *node)
 
 		case K_download_errorMessage:
 			free(d->error_message);
-			d->error_message = strdup(field->val.str);
+			d->error_message = strdup(field->str);
 			break;
 
 		case K_download_downloadSpeed:
 			global.download_speed_total -= d->download_speed;
-			d->download_speed = strtoul(field->val.str, NULL, 10);
+			d->download_speed = strtoul(field->str, NULL, 10);
 			global.download_speed_total += d->download_speed;
 			break;
 
 		case K_download_uploadSpeed:
 			global.upload_speed_total -= d->upload_speed;
-			d->upload_speed = strtoul(field->val.str, NULL, 10);
+			d->upload_speed = strtoul(field->str, NULL, 10);
 			global.upload_speed_total += d->upload_speed;
 			break;
 
 		case K_download_totalLength:
-			d->total = strtoull(field->val.str, NULL, 10);
+			d->total = strtoull(field->str, NULL, 10);
 			break;
 
 		case K_download_connections:
-			d->num_connections = strtoul(field->val.str, NULL, 10);
+			d->num_connections = strtoul(field->str, NULL, 10);
 			break;
 
 		case K_download_verifiedLength:
-			d->verified = strtoul(field->val.str, NULL, 10);
+			d->verified = strtoul(field->str, NULL, 10);
 			break;
 
 		case K_download_verifyIntegrityPending:
@@ -1562,22 +1560,22 @@ static void
 parse_options(JSONNode const *node, parse_options_cb cb, void *arg)
 {
 	for (node = json_first(node); node; node = json_next(node))
-		cb(node->key, node->val.str, arg);
+		cb(node->key, node->str, arg);
 }
 
 static void
 parse_global_stat(JSONNode const *node)
 {
-	if (json_arr != json_type(node))
+	if (JSONT_ARRAY != json_type(node))
 		return;
 
 	node = json_children(node);
 	node = json_children(node);
 	do {
 		if (0 == strcmp(node->key, "downloadSpeed"))
-			global.download_speed = strtoull(node->val.str, NULL, 10);
+			global.download_speed = strtoull(node->str, NULL, 10);
 		else if (0 == strcmp(node->key, "uploadSpeed"))
-			global.upload_speed = strtoull(node->val.str, NULL, 10);
+			global.upload_speed = strtoull(node->str, NULL, 10);
 	} while ((node = json_next(node)));
 }
 
@@ -1684,7 +1682,7 @@ parse_downloads(JSONNode const *result, struct update_arg *arg)
 			continue;
 		}
 
-		if (json_obj == json_type(result)) {
+		if (JSONT_OBJECT == json_type(result)) {
 			Download **dd;
 
 			upgrade_download(d, &dd);
@@ -1697,7 +1695,7 @@ parse_downloads(JSONNode const *result, struct update_arg *arg)
 
 		if (arg->has_get_peers || arg->has_get_servers) {
 			result = json_next(result);
-			if (json_obj == json_type(result)) {
+			if (JSONT_OBJECT == json_type(result)) {
 				error_handler(result);
 			} else {
 				node = json_children(result);
@@ -1707,7 +1705,7 @@ parse_downloads(JSONNode const *result, struct update_arg *arg)
 
 		if (arg->has_get_options) {
 			result = json_next(result);
-			if (json_obj == json_type(result)) {
+			if (JSONT_OBJECT == json_type(result)) {
 				error_handler(result);
 			} else {
 				node = json_children(result);
@@ -1717,11 +1715,11 @@ parse_downloads(JSONNode const *result, struct update_arg *arg)
 
 		if (arg->has_get_position) {
 			result = json_next(result);
-			if (json_obj == json_type(result)) {
+			if (JSONT_OBJECT == json_type(result)) {
 				error_handler(result);
 			} else {
 				node = json_children(result);
-				d->queue_index = node->val.num;
+				d->queue_index = node->num;
 			}
 		}
 
@@ -2007,7 +2005,7 @@ change_position_handler(JSONNode const *result, Download *d)
 		queue_changed();
 		update();
 
-		d->queue_index = result->val.num;
+		d->queue_index = result->num;
 		on_downloads_change(true);
 		refresh();
 	}
@@ -3196,7 +3194,7 @@ update_all_handler(JSONNode const *result, void *arg)
 		JSONNode const *downloads_list;
 		JSONNode const *node;
 
-		if (json_arr != json_type(result)) {
+		if (JSONT_ARRAY != json_type(result)) {
 			error_handler(result);
 			continue;
 		}
@@ -3210,7 +3208,7 @@ update_all_handler(JSONNode const *result, void *arg)
 			 * we check if only we modified the list */
 			Download **dd = download_index == num_downloads
 				? new_download()
-				: get_download_by_gid(json_get(node, "gid")->val.str);
+				: get_download_by_gid(json_get(node, "gid")->str);
 			if (!dd)
 				continue;
 			d = *dd;
@@ -3574,19 +3572,19 @@ add_downloads_handler(JSONNode const *result, void *arg)
 	for (result = json_first(result); result; result = json_next(result)) {
 		Download **dd;
 
-		if (json_obj == json_type(result)) {
+		if (JSONT_OBJECT == json_type(result)) {
 			ok = false;
 			error_handler(result);
 		} else {
 			JSONNode const *gid = json_children(result);
 
-			if (json_str == json_type(gid)) {
+			if (JSONT_STRING == json_type(gid)) {
 				/* single GID returned */
-				if ((dd = get_download_by_gid(gid->val.str)))
+				if ((dd = get_download_by_gid(gid->str)))
 					selidx = dd - downloads;
 			} else {
 				/* get first GID of the array */
-				if ((dd = get_download_by_gid(json_children(gid)->val.str)))
+				if ((dd = get_download_by_gid(json_children(gid)->str)))
 					selidx = dd - downloads;
 			}
 		}
