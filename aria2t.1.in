@@ -167,10 +167,18 @@ Actions directory.
 Session file.
 .
 .SH EXAMPLE
-Connect to “127.0.0.1:16800” using “$$secret$$” token:
+Start aria2c server and connect to it from another terminal:
 .PP
 .EX
-env ARIA_RPC_PORT=16800 'ARIA_RPC_SECRET=$$secret$$' aria2t
+aria2c \\
+  --enable-rpc \\
+  --rpc-secret=mysecret \\
+  --rpc-listen-port=16800 \\
+  --input-file=session.gz \\
+  --save-session=session.gz \\
+  --rpc-max-request-size=100M
+
+env ARIA_RPC_PORT=16800 ARIA_RPC_SECRET=mysecret aria2t
 .EE
 .
 .SH "SEE ALSO"
