@@ -7,11 +7,11 @@
 void ws_open(char const *host, in_port_t port);
 void ws_close(void);
 int ws_fileno(void);
-bool ws_isalive(void);
-void ws_read(void);
-int ws_write(char const *msg, size_t msglen);
+int ws_is_alive(void);
+int ws_recv(void);
+int ws_send(char const *msg, size_t msg_size);
 
-extern void on_ws_message(char *msg, uint64_t msglen);
+extern void on_ws_message(char *msg, uint64_t msg_size);
 extern void on_ws_close(void);
 extern void on_ws_open(void);
 
