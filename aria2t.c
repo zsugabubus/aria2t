@@ -761,11 +761,11 @@ update_download_tags(Download *d)
 		char pathbuf[PATH_MAX];
 
 		snprintf(pathbuf, sizeof pathbuf, "%s/%s", d->dir, d->name);
-		size = getxattr(pathbuf, tags_xattr, d->tags, sizeof tags - 1);
+		size = getxattr(pathbuf, tags_xattr, tags, sizeof tags - 1);
 	}
 
 	if (size < 0 && 0 < d->num_files && d->files[0].path)
-		size = getxattr(d->files[0].path, tags_xattr, d->tags, sizeof tags - 1);
+		size = getxattr(d->files[0].path, tags_xattr, tags, sizeof tags - 1);
 
 	free(d->tags);
 	d->tags = 0 < size ? malloc(size + 1 /* NUL */) : NULL;
