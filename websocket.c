@@ -301,7 +301,6 @@ ws_recv(void)
 			buf_alloced = frame_size;
 		}
 
-		memset(buf + buf_size, 0xcc, buf_alloced - buf_size);
 		ssize_t res;
 		if ((res = read(ws, buf + buf_size, buf_alloced - buf_size)) < 0) {
 			int ret = -errno;
@@ -312,6 +311,5 @@ ws_recv(void)
 			return 0;
 
 		buf_size += (size_t)res;
-		memset(buf + buf_size, 0x0c, buf_alloced - buf_size);
 	}
 }
