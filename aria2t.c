@@ -30,8 +30,6 @@
 
 #include "keys.in"
 
-#define XATTR_NAME "user.tags"
-
 #define addspaces(n) addnstr("                                          "/*31+5+6=42*/, n);
 
 enum {
@@ -52,6 +50,8 @@ enum {
 
 #define PEER_ADDRESS_WIDTH (int)(2 + sizeof(((Peer *)0)->ip) + 1 + 5)
 #define PEER_INFO_WIDTH 24
+
+static char const *tags_xattr;
 
 typedef struct {
 	uint8_t peer_id[20];
@@ -439,9 +439,12 @@ default_handler(JSONNode const *result, void *arg)
 }
 
 static void
-load_config(void)
+init_config(void)
 {
 	char *str;
+
+	(tags_xattr = getenv("ARIA2T_TAGS_XATTR")) ||
+	(tags_xattr = "user.tags");
 
 	(remote_host = getenv("ARIA_RPC_HOST")) ||
 	(remote_host = "127.0.0.1");
@@ -747,47 +750,37 @@ do_rpc(RPCRequest *rpc)
 static void
 update_download_tags(Download *d)
 {
-	ssize_t size;
-	char *p;
+	ssize_t size = -1;
+	char tags[256];
 
-	/* do not try read tags if aria2 is remote */
+	/* Do not try read tags if aria2 is remote. */
 	if (!is_local)
 		return;
 
-	if (!d->tags)
-		d->tags = malloc(255 + 1);
-	if (!d->tags)
-		goto no_tags;
-
-	if (d->dir && d->name) {
+	if (size < 0 && d->dir && d->name) {
 		char pathbuf[PATH_MAX];
 
 		snprintf(pathbuf, sizeof pathbuf, "%s/%s", d->dir, d->name);
-		if (0 < (size = getxattr(pathbuf, XATTR_NAME, d->tags, 255)))
-			goto has_tags;
+		size = getxattr(pathbuf, tags_xattr, d->tags, sizeof tags - 1);
 	}
 
-	if (0 < d->num_files && d->files[0].path)
-		if (0 < (size = getxattr(d->files[0].path, XATTR_NAME, d->tags, 255)))
-			goto has_tags;
+	if (size < 0 && 0 < d->num_files && d->files[0].path)
+		size = getxattr(d->files[0].path, tags_xattr, d->tags, sizeof tags - 1);
 
-	goto no_tags;
+	free(d->tags);
+	d->tags = 0 < size ? malloc(size + 1 /* NUL */) : NULL;
 
-has_tags:
-	d->tags[size] = '\0';
-	/* transform tags: , -> ' ' */
-	for (p = d->tags; (p += strcspn(p, "\t\r\n")) && *p; ++p)
-		*p = ' ';
+	if (d->tags) {
+		for (ssize_t i = 0; i < size; ++i)
+			if (isspace(tags[i]))
+				tags[i] = ' ';
 
-	goto changed;
+		memcpy(d->tags, tags, size);
+		d->tags[size] = '\0';
+	}
 
-no_tags:
-	free(d->tags), d->tags = NULL;
-	goto changed;
-
-changed:
-	/* when longest tag changes we have to reset column width; at next draw
-	 * it will be recomputed */
+	/* When longest tag changes we have to reset column width; at next draw
+	 * it will be recomputed. */
 	if (longest_tag == d) {
 		longest_tag = NULL;
 		tag_col_width = 0;
@@ -4736,7 +4729,7 @@ main(int argc, char *argv[])
 		}
 	}
 
-	load_config();
+	init_config();
 
 	init_action();
 

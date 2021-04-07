@@ -134,6 +134,15 @@ Configuration root directory.
 Default: $HOME/.config/aria2t.
 .
 .TP
+.B ARIA2T_TAGS_XATTR
+Extended attribute to read tags from.
+Refer to
+.BR getfattr (1),
+.BR setfattr (1).
+.sp
+Default: user.tags
+.
+.TP
 .B VISUAL, EDITOR
 Used program for opening
 .I session file
