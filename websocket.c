@@ -120,8 +120,8 @@ ws_connect(char const *host, in_port_t port)
 
 	if ((ret = getaddrinfo(host, port_str, &hints, &info))) {
 		set_error_msg("%s", EAI_SYSTEM == ret
-			? strerror(errno)
-			: gai_strerror(ret));
+				? strerror(errno)
+				: gai_strerror(ret));
 		return -1;
 	}
 

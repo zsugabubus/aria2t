@@ -3267,7 +3267,7 @@ static int
 run_action(Download *d, char const *name, ...)
 {
 	char filename[NAME_MAX];
-	char filepath[PATH_MAX];
+	char pathname[PATH_MAX];
 	va_list argptr;
 	pid_t pid;
 	int status;
@@ -3280,21 +3280,18 @@ run_action(Download *d, char const *name, ...)
 		d = downloads[selidx];
 
 	if (getenv("ARIA2T_CONFIG"))
-		snprintf(filepath, sizeof filepath, "%s/actions/%s",
+		snprintf(pathname, sizeof pathname, "%s/actions/%s",
 				getenv("ARIA2T_CONFIG"), filename);
 	else if (getenv("HOME"))
-		snprintf(filepath, sizeof filepath, "%s/.config/aria2t/actions/%s",
+		snprintf(pathname, sizeof pathname, "%s/.config/aria2t/actions/%s",
 				getenv("HOME"), filename);
 	else
 		return -1;
 
 	endwin();
 
-	if (0 == (pid = vfork())) {
-		execlp(filepath, filepath,
-				d ? d->gid : "",
-				session_file,
-				NULL);
+	if (!(pid = vfork())) {
+		execl(pathname, filename, d ? d->gid : "", session_file, NULL);
 		_exit(127);
 	}
 
@@ -3348,7 +3345,7 @@ out:
 static int
 fileout(bool must_edit)
 {
-	char *prog;
+	char const *prog;
 	pid_t pid;
 	int status;
 
@@ -3363,12 +3360,12 @@ fileout(bool must_edit)
 
 	endwin();
 
-	if (0 == (pid = fork())) {
+	if (!(pid = vfork())) {
 		execlp(prog, prog, session_file, NULL);
 		_exit(127);
 	}
 
-	while (-1 == waitpid(pid, &status, 0) && errno == EINTR)
+	while (-1 == waitpid(pid, &status, 0) && EINTR == errno)
 		;
 
 	begwin();
