@@ -3295,7 +3295,7 @@ run_action(Download *d, char const *name, ...)
 		_exit(127);
 	}
 
-	while (-1 == waitpid(pid, &status, 0) && errno == EINTR)
+	while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
 		;
 
 	/* become foreground process */
@@ -3365,7 +3365,7 @@ fileout(bool must_edit)
 		_exit(127);
 	}
 
-	while (-1 == waitpid(pid, &status, 0) && EINTR == errno)
+	while (waitpid(pid, &status, 0) < 0 && EINTR == errno)
 		;
 
 	begwin();
