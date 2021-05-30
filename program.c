@@ -5,7 +5,7 @@
 char *error_msg;
 
 void
-set_error_msg(char const *format, ...)
+show_error(char const *format, ...)
 {
 	va_list argptr;
 	int size;

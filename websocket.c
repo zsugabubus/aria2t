@@ -65,7 +65,7 @@ ws_http_upgrade(char const *host, in_port_t port)
 
 	if (write(ws, buf, buf_size) < 0) {
 		ret = -errno;
-		set_error_msg("%s", strerror(errno));
+		show_error("%s", strerror(errno));
 		return ret;
 	}
 
@@ -84,7 +84,7 @@ ws_http_upgrade(char const *host, in_port_t port)
 			buf_size += (size_t)res;
 
 			if (memcmp(buf, HTTP_SWITCHING_PROTOCOLS, strlen(HTTP_SWITCHING_PROTOCOLS))) {
-				set_error_msg("WebSocket connection refused");
+				show_error("WebSocket connection refused");
 				return -EINVAL;
 			}
 
@@ -97,7 +97,7 @@ ws_http_upgrade(char const *host, in_port_t port)
 			continue;
 		} else {
 			ret = -errno;
-			set_error_msg("%s", strerror(errno));
+			show_error("%s", strerror(errno));
 			return ret;
 		}
 	}
@@ -119,7 +119,7 @@ ws_connect(char const *host, in_port_t port)
 	sprintf(port_str, "%hu", port);
 
 	if ((ret = getaddrinfo(host, port_str, &hints, &info))) {
-		set_error_msg("%s", EAI_SYSTEM == ret
+		show_error("%s", EAI_SYSTEM == ret
 				? strerror(errno)
 				: gai_strerror(ret));
 		return -1;
@@ -144,11 +144,11 @@ ws_connect(char const *host, in_port_t port)
 	freeaddrinfo(info);
 
 	if (ws < 0) {
-		set_error_msg(strerror(errno));
+		show_error(strerror(errno));
 		return -1;
 	}
 
-	set_error_msg(NULL);
+	show_error(NULL);
 	return 0;
 }
 

@@ -537,7 +537,7 @@ get_download_by_gid(char const *gid)
 static void
 clear_error_msg(void)
 {
-	set_error_msg(NULL);
+	show_error(NULL);
 }
 
 static void
@@ -546,7 +546,7 @@ error_handler(JSONNode const *error)
 	JSONNode const *message = json_get(error, "message");
 
 	if (MODE_VISUAL == mode.type) {
-		set_error_msg("%s", message->str);
+		show_error("%s", message->str);
 		draw_statusline();
 		refresh();
 	} else {
@@ -681,7 +681,7 @@ new_rpc(void)
 			goto found;
 	}
 
-	set_error_msg("Too many pending messages");
+	show_error("Too many pending messages");
 	draw_statusline();
 
 	return NULL;
@@ -738,7 +738,7 @@ do_rpc(RPCRequest *rpc)
 	if (ws_send(jw->buf, jw->buf_size) < 0) {
 		free_rpc(rpc);
 
-		set_error_msg("write: %s", strerror(errno));
+		show_error("write: %s", strerror(errno));
 		draw_statusline();
 
 		return false;
@@ -1208,9 +1208,7 @@ update_display_name(Download *d)
 		}
 
 		if (f->num_uris > 0 && f->uris) {
-			uint32_t i;
-
-			for (i = 0; i < f->num_uris; ++i) {
+			for (uint32_t i = 0; i < f->num_uris; ++i) {
 				if (f->uris[i].status == URI_STATUS_USED) {
 					assert(f->uris[i].uri);
 					d->display_name = f->uris[i].uri;
@@ -2293,9 +2291,7 @@ draw_peers(void)
 		draw_our_peer(d, &y);
 
 		if (d->peers) {
-			size_t i;
-
-			for (i = 0; i < d->num_peers; ++i)
+			for (uint32_t i = 0; i < d->num_peers; ++i)
 				draw_peer(d, i, &y);
 
 			/* linewrap */
@@ -2310,7 +2306,7 @@ draw_peers(void)
 }
 
 static void
-draw_file(Download const *d, size_t i, int *y, uint64_t offset)
+draw_file(Download const *d, uint32_t i, int *y, uint64_t offset)
 {
 	File const *f = &d->files[i];
 	char szhave[6];
@@ -2323,7 +2319,7 @@ draw_file(Download const *d, size_t i, int *y, uint64_t offset)
 	szpercent[fmt_percent(szpercent, f->have, f->total)] = '\0';
 
 	attr_set(A_BOLD, 0, NULL);
-	mvprintw((*y)++, 0, "  %6" PRIuPTR ": ", i + 1);
+	mvprintw((*y)++, 0, "  %6"PRIu32": ", i + 1);
 
 	attr_set(A_NORMAL, 0, NULL);
 	printw("%s/%s[", szhave, sztotal);
@@ -2413,10 +2409,9 @@ draw_files(void)
 		}
 
 		if (0 < d->num_files) {
-			size_t i;
 			uint64_t offset = 0;
 
-			for (i = 0; i < d->num_files; ++i) {
+			for (uint32_t i = 0; i < d->num_files; ++i) {
 				draw_file(d, i, &y, offset);
 				offset += d->files[i].total;
 			}
@@ -3268,13 +3263,11 @@ run_action(Download *d, char const *name, ...)
 {
 	char filename[NAME_MAX];
 	char pathname[PATH_MAX];
-	va_list argptr;
-	pid_t pid;
-	int status;
+	va_list ap;
 
-	va_start(argptr, name);
-	vsnprintf(filename, sizeof filename, name, argptr);
-	va_end(argptr);
+	va_start(ap, name);
+	vsnprintf(filename, sizeof filename, name, ap);
+	va_end(ap);
 
 	if (!d && 0 < num_downloads)
 		d = downloads[selidx];
@@ -3290,15 +3283,16 @@ run_action(Download *d, char const *name, ...)
 
 	endwin();
 
+	pid_t pid;
 	if (!(pid = vfork())) {
 		execl(pathname, filename, d ? d->gid : "", session_file, NULL);
 		_exit(127);
 	}
 
-	while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
-		;
+	int status;
+	while (waitpid(pid, &status, 0) < 0 && EINTR == errno);
 
-	/* become foreground process */
+	/* Become foreground process. */
 	tcsetpgrp(STDERR_FILENO, getpgrp());
 	begwin();
 
@@ -3314,25 +3308,24 @@ run_action(Download *d, char const *name, ...)
 }
 
 static char *
-file_b64_enc(char const *pathname)
+b64_enc_file(char const *pathname)
 {
-	int fd;
-	unsigned char *buf;
 	char *b64 = NULL;
-	size_t b64len;
-	struct stat st;
 
-	if (-1 == (fd = open(pathname, O_RDONLY)))
+	int fd;
+	if ((fd = open(pathname, O_RDONLY)) < 0)
 		goto out;
 
-	if (-1 == fstat(fd, &st))
+	struct stat st;
+	if (fstat(fd, &st) < 0)
 		goto out_close;
 
-	buf = mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+	uint8_t *buf = mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
 	if (MAP_FAILED == buf)
 		goto out_close;
 
-	b64 = b64_enc(buf, st.st_size, &b64len);
+	size_t b64_size;
+	b64 = b64_enc(buf, st.st_size, &b64_size);
 
 	munmap(buf, st.st_size);
 
@@ -3345,26 +3338,25 @@ out:
 static int
 fileout(bool must_edit)
 {
-	char const *prog;
-	pid_t pid;
-	int status;
-
+	char const *cmd;
 	if (must_edit) {
-		(prog = getenv("VISUAL")) ||
-		(prog = getenv("EDITOR")) ||
-		(prog = "vi");
+		(cmd = getenv("VISUAL")) ||
+		(cmd = getenv("EDITOR")) ||
+		(cmd = "vi");
 	} else {
-		(prog = getenv("PAGER")) ||
-		(prog = "less");
+		(cmd = getenv("PAGER")) ||
+		(cmd = "less");
 	}
 
 	endwin();
 
+	pid_t pid;
 	if (!(pid = vfork())) {
-		execlp(prog, prog, session_file, NULL);
+		execlp(cmd, cmd, session_file, NULL);
 		_exit(127);
 	}
 
+	int status;
 	while (waitpid(pid, &status, 0) < 0 && EINTR == errno)
 		;
 
@@ -3376,9 +3368,9 @@ fileout(bool must_edit)
 }
 
 static void
-write_option(char const *option, char const *value, FILE *file)
+write_option(char const *option, char const *value, FILE *stream)
 {
-	fprintf(file, "%s=%s\n", option, value);
+	fprintf(stream, "%s=%s\n", option, value);
 }
 
 static void
@@ -3411,12 +3403,8 @@ change_option_handler(JSONNode const *result, Download *d)
 static void
 show_options_handler(JSONNode const *result, Download *d)
 {
-	FILE *f;
-	ssize_t len;
-	char *line;
-	size_t linesiz;
+	FILE *s;
 	RPCRequest *rpc;
-	int mode;
 
 	if (!result)
 		goto out;
@@ -3426,21 +3414,22 @@ show_options_handler(JSONNode const *result, Download *d)
 	if (d && !upgrade_download(d, NULL))
 		goto out;
 
-	if (!(f = fopen(session_file, "w")))
+	if (!(s = fopen(session_file, "w")))
 		goto out;
 
-	parse_options(result, (parse_options_cb)write_option, f);
+	parse_options(result, (parse_options_cb)write_option, s);
 	parse_options(result, (parse_options_cb)parse_option, d);
 
-	fclose(f);
+	fclose(s);
 
-	if ((mode = run_action(NULL, d ? "i" : "I")) < 0)
-		mode = fileout(false);
+	int status;
+	if ((status = run_action(NULL, d ? "i" : "I")) < 0)
+		status = fileout(false);
 
-	if (EXIT_SUCCESS != mode)
+	if (EXIT_SUCCESS != status)
 		goto out;
 
-	if (!(f = fopen(session_file, "r")))
+	if (!(s = fopen(session_file, "r")))
 		goto out;
 
 	if (!(rpc = new_rpc()))
@@ -3460,10 +3449,14 @@ show_options_handler(JSONNode const *result, Download *d)
 	if (d)
 		/* “gid” */
 		json_write_str(jw, d->gid);
+	/* “options” */
 	json_write_beginobj(jw);
 
-	line = NULL, linesiz = 0;
-	while (0 <= (len = getline(&line, &linesiz, f))) {
+	char *line = NULL;
+	size_t line_size = 0;
+	ssize_t line_len;
+
+	while (0 <= (line_len = getline(&line, &line_size, s))) {
 		char *name, *value;
 
 		name = line;
@@ -3471,8 +3464,8 @@ show_options_handler(JSONNode const *result, Download *d)
 			continue;
 		*value++ = '\0';
 
-		if (line[len - 1] == '\n')
-			line[len - 1] = '\0';
+		if (line[line_len - 1] == '\n')
+			line[line_len - 1] = '\0';
 
 		json_write_key(jw, name);
 		json_write_str(jw, value);
@@ -3486,7 +3479,7 @@ show_options_handler(JSONNode const *result, Download *d)
 	do_rpc(rpc);
 
 out_fclose:
-	fclose(f);
+	fclose(s);
 
 out:
 	unref_download(d);
@@ -3579,25 +3572,22 @@ static void
 add_downloads(char cmd)
 {
 	RPCRequest *rpc;
-	FILE *f;
-	char *line;
-	size_t linesiz;
-	ssize_t len;
-	int mode;
+	FILE *s;
+	int status;
 
 	if (cmd) {
-		if ((mode = run_action(NULL, "%c", cmd)) < 0)
-			mode = fileout(true);
+		if ((status = run_action(NULL, "%c", cmd)) < 0)
+			status = fileout(true);
 
-		if (EXIT_SUCCESS != mode)
+		if (EXIT_SUCCESS != status)
 			return;
 
 		clear_error_msg();
 
-		if (!(f = fopen(session_file, "r")))
+		if (!(s = fopen(session_file, "r")))
 			return;
 	} else {
-		f = stdin;
+		s = stdin;
 	}
 
 	if (!(rpc = new_rpc()))
@@ -3613,26 +3603,31 @@ add_downloads(char cmd)
 	/* 1st arg: “methods” */
 	json_write_beginarr(jw); /* {{{ */
 
-	line = NULL, linesiz = 0;
-next:
-	for (len = getline(&line, &linesiz, f); 0 <= len;) {
+	char *line = NULL;
+	size_t line_size = 0;
+	ssize_t line_len;
+
+	for (;;) {
+		if ((line_len = getline(&line, &line_size, s)) < 0)
+			break;
+
 		char *uri, *next_uri;
 		char *b64str = NULL;
 		enum { URI, TORRENT, METALINK } type;
 
-		if (0 < len && line[len - 1] == '\n')
-			line[--len] = '\0';
+		if (0 < line_len && line[line_len - 1] == '\n')
+			line[--line_len] = '\0';
 
-		if (len <= 0)
-			goto next;
+		if (line_len <= 0)
+			continue;
 
 		uri = line;
 		if ((next_uri = strchr(uri, '\t')))
 			*next_uri++ = '\0';
 
 #define ISSUFFIX(lit) \
-	((size_t)len > ((sizeof lit) - 1) && \
-		 !memcmp(uri + (size_t)len - ((sizeof lit) - 1), lit, (sizeof lit) - 1))
+	((size_t)line_len > ((sizeof lit) - 1) && \
+		 !memcmp(uri + (size_t)line_len - ((sizeof lit) - 1), lit, (sizeof lit) - 1))
 
 		if (ISSUFFIX(".torrent"))
 			type = TORRENT;
@@ -3641,7 +3636,7 @@ next:
 		else
 			type = URI;
 
-		if (type != URI && !(b64str = file_b64_enc(uri)))
+		if (type != URI && !(b64str = b64_enc_file(uri)))
 			type = URI;
 #undef ISSUFFIX
 
@@ -3702,14 +3697,14 @@ next:
 		}
 		/* “options” */
 		json_write_beginobj(jw);
-		while (0 <= (len = getline(&line, &linesiz, f))) {
+		while (0 <= (line_len = getline(&line, &line_size, s))) {
 			char *name, *value;
 
-			if (len <= 0)
+			if (line_len <= 0)
 				continue;
 
-			if (line[len - 1] == '\n')
-				line[--len] = '\0';
+			if (line[line_len - 1] == '\n')
+				line[--line_len] = '\0';
 
 			for (name = line; isspace(*name); )
 				++name;
@@ -3746,7 +3741,7 @@ next:
 	do_rpc(rpc);
 
 out_fclose:
-	fclose(f);
+	fclose(s);
 }
 
 static void
@@ -3885,7 +3880,7 @@ remove_download(Download *d, bool force)
 		return;
 
 	if (D_ACTIVE == abs(d->status)) {
-		set_error_msg("Refusing to delete active download");
+		show_error("Refusing to delete active download");
 		draw_statusline();
 		return;
 	}
@@ -4285,7 +4280,7 @@ read_stdin(void)
 		 * remove a non-active download.
 		 */
 		case 'D':
-		case KEY_DC: /*delete*/
+		case KEY_DC: /* Delete. */
 			if (0 < num_downloads) {
 				remove_download(downloads[selidx], do_forced);
 				do_forced = 0;
@@ -4612,9 +4607,7 @@ on_ws_close(void)
 static void
 init_action(void)
 {
-	size_t i;
-
-	for (i = 0; i < mode.num_sel; ++i) {
+	for (size_t i = 0; i < mode.num_sel; ++i) {
 		if (!is_gid(mode.sel[i])) {
 			mode.use_files = true;
 			break;
@@ -4690,13 +4683,11 @@ setup_sighandlers(void)
 int
 main(int argc, char *argv[])
 {
-	int argi;
-
 	setlocale(LC_ALL, "");
 
 	setup_sighandlers();
 
-	for (argi = 1; argi < argc;) {
+	for (int argi = 1; argi < argc;) {
 		char const *arg = argv[argi++];
 		if (!strcmp(arg, "--select")) {
 			if (argc <= argi)
