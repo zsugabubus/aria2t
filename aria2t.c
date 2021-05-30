@@ -2305,6 +2305,31 @@ draw_peers(void)
 	/* move(0, curx); */
 }
 
+static char const *
+get_file_display_name(Download const *d, File const *f)
+{
+	char const *ret;
+
+	if (f->path) {
+		ret = f->path;
+		if (d->dir) {
+			size_t dir_size = strlen(d->dir);
+
+			if (!strncmp(f->path, d->dir, dir_size) &&
+			    '/' == f->path[dir_size])
+			{
+				ret = f->path + dir_size + 1;
+				/* Leading slash is misleading. */
+				while ('/' == *ret)
+					++ret;
+			}
+		}
+	} else {
+		ret = f->selected ? "(not downloaded yet)" : "(none)";
+	}
+	return ret;
+}
+
 static void
 draw_file(Download const *d, uint32_t i, int *y, uint64_t offset)
 {
@@ -2337,22 +2362,7 @@ draw_file(Download const *d, uint32_t i, int *y, uint64_t offset)
 		addstr(szpercent);
 	}
 
-	char const *name;
-	if (f->path) {
-		name = f->path;
-		if (d->dir) {
-			size_t dir_size = strlen(d->dir);
-			if (!strncmp(f->path, d->dir, dir_size) &&
-			    '/' == f->path[dir_size]) {
-				name = f->path + dir_size + 1;
-				/* leading slash is misleading */
-				while ('/' == *name)
-					++name;
-			}
-		}
-	} else {
-		name = f->selected ? "(not downloaded yet)" : "(none)";
-	}
+	char const *name = get_file_display_name(d, f);
 	printw("] %s", name);
 	clrtoeol();
 
@@ -3971,6 +3981,163 @@ jump_next_group(void)
 }
 
 static void
+select_files(Download *d)
+{
+	FILE *s;
+
+	if (!(s = fopen(session_file, "w")))
+		return;
+
+	fputs("# Index\tHave\tTotal\tPercent\tName\n", s);
+	for (int state = 1;;) {
+		fprintf(s, "# %s files (%"PRIu32"/%"PRIu32")\n",
+				state ? "Selected" : "Unselected",
+				state ? d->num_selfiles : d->num_files - d->num_selfiles,
+				d->num_files);
+
+		for (uint32_t i = 0; i < d->num_files; ++i) {
+			File const *f = &d->files[i];
+			if (f->selected == state) {
+				char const *name = get_file_display_name(d, f);
+				char szhave[6];
+				char sztotal[6];
+				char szpercent[6];
+
+				szhave[fmt_space(szhave, f->have)] = '\0';
+				sztotal[fmt_space(sztotal, f->total)] = '\0';
+				szpercent[fmt_percent(szpercent, f->have, f->total)] = '\0';
+
+				fprintf(s, "%"PRIu32"\t%s\t%s\t%s\t%s\n",
+						i + 1,
+						szhave, sztotal, szpercent,
+						name);
+			}
+		}
+		if (--state < 0)
+			break;
+		fputc('\n', s);
+	}
+
+	fprintf(s,
+			"\n"
+			"# Select files of download %s\n"
+			"#\n"
+			"# To unselect a file remove that line.\n"
+			"#\n"
+			"# Lines can be re-ordered and edited unless their index is present.\n"
+			"#\n"
+			"# Lines starting with # are ignored.\n"
+			"#\n"
+			"# If you do not remove unselected files, they will be selected.\n"
+			"#\n",
+			d->display_name);
+
+	fclose(s);
+
+	int status;
+	if ((status = run_action(d, "f")) < 0)
+		status = fileout(true);
+
+	if (EXIT_SUCCESS != status)
+		return;
+
+	if (!(s = fopen(session_file, "r")))
+		return;
+
+	for (uint32_t i = 0; i < d->num_files; ++i)
+		d->files[i].selected = false;
+	d->num_selfiles = 0;
+
+	char *line = NULL;
+	size_t line_size = 0;
+	ssize_t line_len;
+
+	while (0 <= (line_len = getline(&line, &line_size, s))) {
+		if (line_len <= 0 || '#' == line[0])
+			continue;
+
+		uint32_t file_idx;
+		if (1 != sscanf(line, "%"SCNu32, &file_idx))
+			continue;
+		--file_idx;
+
+		if (d->num_files <= file_idx)
+			continue;
+
+		d->files[file_idx].selected = true;
+		++d->num_selfiles;
+	}
+
+	fclose(s);
+	free(line);
+
+	char *value = NULL;
+	int value_len = 0;
+	int value_size = 0;
+
+	for (;;) {
+		for (uint32_t i = 0; i < d->num_files; ++i) {
+			if (!d->files[i].selected)
+				continue;
+
+			uint32_t from = i;
+			uint32_t to = i;
+
+			for (; to + 1 < d->num_files && d->files[to + 1].selected; ++to);
+
+			value_len += snprintf(value + value_len, value ? value_size : 0,
+					from == to
+						? ",%"PRIu32
+						: ",%"PRIu32"-%"PRIu32,
+					from + 1, to + 1);
+
+			i = to;
+		}
+
+		if (value)
+			break;
+
+		value_size = value_len + 1 /* NUL */;
+		value_len = 0;
+
+		if (!(value = malloc(value_size)))
+			return;
+	}
+
+	RPCRequest *rpc;
+
+	if (!(rpc = new_rpc())) {
+		free(value);
+		return;
+	}
+
+	rpc->handler = (RPCHandler)change_option_handler;
+	rpc->arg = ref_download(d);
+
+	json_write_key(jw, "method");
+	json_write_str(jw, "aria2.changeOption");
+
+	json_write_key(jw, "params");
+	json_write_beginarr(jw);
+
+	/* “secret” */
+	json_write_str(jw, secret_token);
+	/* “gid” */
+	json_write_str(jw, d->gid);
+	/* “options” */
+	json_write_beginobj(jw);
+	json_write_key(jw, "select-file");
+	json_write_str(jw, value + (value && ',' == value[0]));
+	json_write_endobj(jw);
+
+	json_write_endarr(jw);
+
+	do_rpc(rpc);
+
+	free(value);
+}
+
+static void
 read_stdin(void)
 {
 	int ch;
@@ -4271,6 +4438,16 @@ read_stdin(void)
 		case 'i':
 		case 'I':
 			show_options(0 < num_downloads && ch == 'i' ? downloads[selidx] : NULL);
+			break;
+
+		/*MAN(KEYS)
+		 * .TP
+		 * .BR f
+		 * Interactively select files.
+		 */
+		case 'f':
+			if (0 < num_downloads)
+				select_files(downloads[selidx]);
 			break;
 
 		/*MAN(KEYS)
