@@ -63,12 +63,12 @@ typedef struct {
 	bool down_choked: 1;
 
 	uint32_t pieces_have;
-	struct timespec latest_change; /* latest time when pieces_have changed */
+	struct timespec latest_change; /* Latest time when pieces_have changed. */
 
 	uint64_t peer_download_speed;
 
-	uint64_t download_speed; /* from peer */
-	uint64_t upload_speed; /* to peer */
+	uint64_t download_speed; /* ...from peer. */
+	uint64_t upload_speed; /* ...to peer. */
 
 	uint8_t *progress;
 } Peer;
@@ -102,7 +102,7 @@ typedef struct {
 static char const NONAME[] = "?";
 
 /* NOTE: Order is relevant for sorting. */
-enum {
+enum DownloadType {
 	D_UNKNOWN,
 	D_WAITING,
 	D_ACTIVE,
@@ -130,8 +130,7 @@ struct Download {
 
 	char *error_msg;
 
-	uint32_t num_files;
-	uint32_t num_selfiles;
+	uint32_t num_files, num_files_selected;
 
 	uint32_t num_connections;
 
@@ -153,7 +152,7 @@ struct Download {
 
 	char *dir;
 
-	bool follows; /* follows or belongsTo |parent| */
+	bool follows; /* Follows or belongsTo |parent|. */
 	Peer *peers;
 	File *files;
 	uint8_t *progress;
@@ -175,49 +174,38 @@ static struct {
 	uint64_t download_speed_limit;
 	uint64_t upload_speed_limit;
 
-	/* computed locally */
+	/* Computed locally. */
 	uint64_t download_speed_total;
 	uint64_t upload_speed_total;
 	uint64_t have_total;
 	uint64_t uploaded_total;
 
-	/* number of downloads that have download-speed-limit set */
+	/* Number of downloads that have download-speed-limit set. */
 	uint64_t num_download_limited;
-	/* number of downloads that have upload-speed-limit or seed-ratio set */
+	/* Number of downloads that have upload-speed-limit or seed-ratio set. */
 	uint64_t num_upload_limited;
 
-	/* number of downloads per statuses */
+	/* Number of downloads per status. */
 	uint32_t num_perstatus[D_NB];
 
 	char external_ip[INET6_ADDRSTRLEN];
 } global;
 
 static struct {
-	enum {
-		MODE_VISUAL = 0,
-		MODE_ADD_DOWNLOADS,
-		MODE_SHUTDOWN,
-		MODE_PRINT_GID,
-		MODE_PAUSE,
-		MODE_UNPAUSE,
-		MODE_PURGE
-	} type;
-	bool use_files;
-	size_t num_sel;
-	char **sel;
-} mode;
-
-static struct {
 	char const *tsl;
 	char const *fsl;
 } ti;
+
+static bool select_need_files;
+static size_t num_selects;
+static char const **selects;
 
 static char const* remote_host;
 static in_port_t remote_port;
 static char *secret_token;
 
 static char session_file[PATH_MAX];
-static bool is_local; /* server runs on local host */
+static bool is_local; /* Server runs on local host? */
 
 struct pollfd pfds[2];
 static struct timespec period;
@@ -236,7 +224,7 @@ static int curx = 0;
 static bool downloads_need_reflow;
 static int tag_col_width = 0;
 static Download const *longest_tag;
-static int do_forced = 0;
+static bool do_forced = false;
 
 static int oldidx;
 
@@ -432,10 +420,9 @@ clear_downloads(void)
 }
 
 static void
-default_handler(JSONNode const *result, void *arg)
+handle_default(JSONNode const *result, void *arg)
 {
 	(void)result, (void)arg;
-	/* just do nothing */
 }
 
 static void
@@ -455,15 +442,13 @@ init_config(void)
 		 !errno)) ||
 	(remote_port = 6800);
 
-	/* “token:$$secret$$” */
+	/* "token:$$secret$$" */
 	(str = getenv("ARIA_RPC_SECRET")) ||
 	(str = "");
 
 	secret_token = malloc(snprintf(NULL, 0, "token:%s", str) + 1);
-	if (!secret_token) {
-		perror("malloc()");
-		exit(EXIT_FAILURE);
-	}
+	if (!secret_token)
+		abort();
 
 	sprintf(secret_token, "token:%s", str);
 }
@@ -500,8 +485,7 @@ upgrade_download(Download const *d, Download ***pdd)
 	if (pdd) {
 		Download **dd = downloads;
 
-		for (; *dd != d; ++dd)
-			;
+		for (; *dd != d; ++dd);
 
 		*pdd = dd;
 	}
@@ -511,6 +495,36 @@ upgrade_download(Download const *d, Download ***pdd)
 
 static bool
 filter_download(Download *d, Download **dd);
+
+static bool
+islxdigit(char c)
+{
+	return ('0' <= c && c <= '9') ||
+	       ('a' <= c && c <= 'f');
+}
+
+static Download *
+find_download_by_gid(char const *gid, char const **endptr)
+{
+	char const *p = gid;
+
+	if (!islxdigit(*p))
+		return NULL;
+
+	uint8_t n = 0;
+	while (++n < 16 && islxdigit(*++p));
+
+	if (endptr)
+		*endptr = p;
+
+	for (size_t i = 0; i < num_downloads; ++i) {
+		Download *d = downloads[i];
+		if (!memcmp(d->gid, gid, n))
+			return d;
+	}
+
+	return NULL;
+}
 
 static Download **
 get_download_by_gid(char const *gid)
@@ -523,6 +537,10 @@ get_download_by_gid(char const *gid)
 		if (!memcmp((*dd)->gid, gid, sizeof (*dd)->gid))
 			return dd;
 
+	/* No new downloads are accepted. */
+	if (num_selects == SIZE_MAX)
+		return NULL;
+
 	if (!(dd = new_download()))
 		return NULL;
 	d = *dd;
@@ -530,35 +548,111 @@ get_download_by_gid(char const *gid)
 	assert(strlen(gid) == sizeof d->gid - 1);
 	memcpy(d->gid, gid, sizeof d->gid);
 
-	/* try applying selectors as soon as possible */
+	/* Try applying selectors as soon as possible. */
 	return filter_download(d, dd) ? dd : NULL;
 }
 
 static void
-clear_error_msg(void)
+clear_error(void)
 {
 	show_error(NULL);
 }
 
 static void
-error_handler(JSONNode const *error)
+handle_error(JSONNode const *error)
 {
 	JSONNode const *message = json_get(error, "message");
 
-	if (MODE_VISUAL == mode.type) {
-		show_error("%s", message->str);
-		draw_statusline();
-		refresh();
-	} else {
-		fprintf(stderr, "%s\n", message->str);
-		exit(EXIT_FAILURE);
-	}
+	show_error("%s", message->str);
+	draw_statusline();
+	refresh();
 }
 
 static void
 free_rpc(RPCRequest *rpc)
 {
 	rpc->handler = NULL;
+}
+
+static void
+begin_rpc_method(char const *method, Download *d)
+{
+	json_write_key(jw, "method");
+	json_write_str(jw, method);
+
+	json_write_key(jw, "params");
+	json_write_beginarr(jw);
+
+	/* "secret" */
+	json_write_str(jw, secret_token);
+	if (d)
+		/* "gid" */
+		json_write_str(jw, d->gid);
+}
+
+
+static void
+end_rpc_method(void)
+{
+	json_write_endarr(jw);
+}
+
+static void
+generate_rpc_method(char const *method)
+{
+	begin_rpc_method(method, NULL);
+	end_rpc_method();
+}
+
+static void
+begin_rpc_multicall(void)
+{
+	json_write_key(jw, "method");
+	json_write_str(jw, "system.multicall");
+
+	json_write_key(jw, "params");
+	json_write_beginarr(jw);
+	/* "methods" */
+	json_write_beginarr(jw);
+}
+
+static void
+end_rpc_multicall(void)
+{
+	json_write_endarr(jw);
+	json_write_endarr(jw);
+}
+
+/* TODO: Maybe these function pairs could be made into a macro. That makes
+ * generate_*s unnecessary. */
+static void
+begin_rpc_multicall_method(char const *method, Download const *d)
+{
+	json_write_beginobj(jw);
+	json_write_key(jw, "methodName");
+	json_write_str(jw, method);
+	json_write_key(jw, "params");
+	json_write_beginarr(jw);
+
+	/* "secret" */
+	json_write_str(jw, secret_token);
+	/* "gid" */
+	if (d)
+		json_write_str(jw, d->gid);
+}
+
+static void
+end_rpc_multicall_method(void)
+{
+	json_write_endarr(jw);
+	json_write_endobj(jw);
+}
+
+static void
+generate_rpc_multicall_method(char const *method, Download const *d)
+{
+	begin_rpc_multicall_method(method, d);
+	end_rpc_multicall_method();
 }
 
 static void
@@ -591,7 +685,7 @@ queue_changed(void)
 }
 
 static void
-notification_handler(char const *method, JSONNode const *event)
+handle_notification(char const *method, JSONNode const *event)
 {
 	static int8_t const STATUS_MAP[] = {
 		[K_notification_none              ] = D_UNKNOWN,
@@ -648,10 +742,10 @@ on_ws_message(char *msg, uint64_t msg_size)
 		RPCRequest *rpc = &rpc_requests[(unsigned)id->num];
 
 		if (!result)
-			error_handler(json_get(nodes, "error"));
+			handle_error(json_get(nodes, "error"));
 
 		/* NOTE: this condition shall always be true, but aria2c
-		 * responses with some long messages with “Parse error.” that
+		 * responses with some long messages with "Parse error." that
 		 * contains id=null, so we cannot get back the handler. the
 		 * best we can do is to ignore and may leak a resource inside
 		 * data. */
@@ -663,7 +757,7 @@ on_ws_message(char *msg, uint64_t msg_size)
 	} else if ((method = json_get(nodes, "method"))) {
 		JSONNode const *params = json_get(nodes, "params");
 
-		notification_handler(method->str, params + 1);
+		handle_notification(method->str, params + 1);
 	} else {
 		assert(0);
 	}
@@ -687,7 +781,7 @@ new_rpc(void)
 	return NULL;
 
 found:
-	rpc->handler = default_handler;
+	rpc->handler = handle_default;
 
 	json_writer_reset(jw);
 	json_write_beginobj(jw);
@@ -715,8 +809,13 @@ clear_rpc_requests(void)
 	}
 }
 
+typedef struct {
+	size_t count;
+	Download *downloads[];
+} Selection;
+
 static void
-fetch_options(Download *d, bool user);
+fetch_options(Selection *s, bool all, bool user);
 
 static void
 parse_session_info(JSONNode const *result)
@@ -1231,7 +1330,7 @@ parse_download_files(Download *d, JSONNode const *node)
 	free_files_of(d);
 
 	d->num_files = json_length(node);
-	d->num_selfiles = 0;
+	d->num_files_selected = 0;
 	if (!(d->files = malloc(d->num_files * sizeof *(d->files))))
 		return;
 
@@ -1267,7 +1366,7 @@ parse_download_files(Download *d, JSONNode const *node)
 
 			case K_file_selected:
 				file.selected = IS_TRUE(field->str);
-				d->num_selfiles += file.selected;
+				d->num_files_selected += file.selected;
 				break;
 
 			case K_file_uris:
@@ -1277,6 +1376,8 @@ parse_download_files(Download *d, JSONNode const *node)
 
 				file.num_uris = json_length(field);
 				file.uris = malloc(file.num_uris * sizeof *(file.uris));
+				if (!file.uris)
+					abort();
 
 				for (uris = json_first(field); uris; uris = json_next(uris)) {
 					JSONNode const *field = json_children(uris);
@@ -1315,44 +1416,40 @@ parse_download_files(Download *d, JSONNode const *node)
 static bool
 is_gid(char const *str)
 {
-	for (uint8_t i = 0; i < 16; ++i) {
-		char c = str[i];
-
-		if (!(('0' <= c && c <= '9') ||
-		      ('a' <= c && c <= 'f') ||
-		      ('A' <= c && c <= 'F')))
+	for (uint8_t i = 0; i < 16; ++i)
+		if (!islxdigit(str[i]))
 			return false;
-
-	}
 
 	return !!str[16];
 }
 
-/* decide whether download |d| (:= *|dd|) should be shown. if not, remove |d|
- * and return false; otherwise return true. */
+/* Decide whether download |d| (:= *|dd|) should be shown. If not, remove |d|
+ * and return false, otherwise true. */
 static bool
 filter_download(Download *d, Download **dd)
 {
-	/* no --selects means all downloads */
-	if (!mode.num_sel)
+	/* No --selects mean all downloads. */
+	if (!num_selects)
+		return true;
+	else if (num_selects == SIZE_MAX)
 		return true;
 
-	for (size_t i = 0; i < mode.num_sel; ++i) {
-		char const *sel = mode.sel[i];
+	for (size_t i = 0; i < num_selects; ++i) {
+		char const *sel = selects[i];
 
 		if (is_gid(sel)) {
-			/* test for matching GID */
+			/* Test for matching GID. */
 			if (!memcmp(sel, d->gid, sizeof d->gid))
 				return true;
 		} else {
-			/* test for matching path prefix */
+			/* Test for matching path prefix. */
 			size_t sel_size = strlen(sel);
 
-			/* missing data can be anything */
+			/* Missing data can be anything, do not remove yet. */
 			if (!d->num_files || !d->files)
 				return true;
 
-			for (size_t j = 0; j < d->num_files; ++j) {
+			for (uint32_t j = 0; j < d->num_files; ++j) {
 				File const *f = &d->files[j];
 
 				if (f->path && !strncmp(f->path, sel, sel_size))
@@ -1361,7 +1458,6 @@ filter_download(Download *d, Download **dd)
 		}
 	}
 
-	/* no selectors matched */
 	if (!dd)
 		(void)upgrade_download(d, &dd);
 	delete_download_at(dd);
@@ -1524,31 +1620,6 @@ parse_download(Download *d, JSONNode const *node)
 	}
 }
 
-typedef void(*parse_options_cb)(char const *, char const *, void *);
-
-static void
-parse_options(JSONNode const *node, parse_options_cb cb, void *arg)
-{
-	for (node = json_first(node); node; node = json_next(node))
-		cb(node->key, node->str, arg);
-}
-
-static void
-parse_global_stat(JSONNode const *node)
-{
-	if (JSONT_ARRAY != json_type(node))
-		return;
-
-	node = json_children(node);
-	node = json_children(node);
-	do {
-		if (!strcmp(node->key, "downloadSpeed"))
-			global.download_speed = strtoull(node->str, NULL, 10);
-		else if (!strcmp(node->key, "uploadSpeed"))
-			global.upload_speed = strtoull(node->str, NULL, 10);
-	} while ((node = json_next(node)));
-}
-
 static void
 parse_option(char const *option, char const *value, Download *d)
 {
@@ -1561,7 +1632,7 @@ parse_option(char const *option, char const *value, Download *d)
 
 		switch (K_option_parse(option)) {
 		default:
-			/* ignore */
+			/* Ignore. */
 			break;
 
 		case K_option_max__download__limit:
@@ -1615,6 +1686,31 @@ parse_option(char const *option, char const *value, Download *d)
 }
 
 static void
+parse_options(JSONNode const *options, void *arg)
+{
+	for (JSONNode const *option = json_first(options);
+	     option;
+	     option = json_next(option))
+		parse_option(option->key, option->str, arg);
+}
+
+static void
+parse_global_stat(JSONNode const *node)
+{
+	if (JSONT_ARRAY != json_type(node))
+		return;
+
+	node = json_children(node);
+	node = json_children(node);
+	do {
+		if (!strcmp(node->key, "downloadSpeed"))
+			global.download_speed = strtoull(node->str, NULL, 10);
+		else if (!strcmp(node->key, "uploadSpeed"))
+			global.upload_speed = strtoull(node->str, NULL, 10);
+	} while ((node = json_next(node)));
+}
+
+static void
 try_connect(void)
 {
 	ws_open(remote_host, remote_port);
@@ -1633,9 +1729,9 @@ parse_downloads(JSONNode const *result, UpdateArg *arg)
 {
 	bool some_insufficient = false;
 
-	for (Download *d; result;
-	       result = json_next(result),
-	       unref_download(d), ++arg)
+	for (Download *d;
+	     result;
+	     (result = json_next(result)), unref_download(d), ++arg)
 	{
 		JSONNode const *node;
 
@@ -1655,7 +1751,8 @@ parse_downloads(JSONNode const *result, UpdateArg *arg)
 		if (JSONT_OBJECT == json_type(result)) {
 			Download **dd;
 
-			upgrade_download(d, &dd);
+			/* Checked previously. */
+			(void)upgrade_download(d, &dd);
 			delete_download_at(dd);
 			goto skip;
 		}
@@ -1666,7 +1763,7 @@ parse_downloads(JSONNode const *result, UpdateArg *arg)
 		if (arg->has_get_peers || arg->has_get_servers) {
 			result = json_next(result);
 			if (JSONT_OBJECT == json_type(result)) {
-				error_handler(result);
+				handle_error(result);
 			} else {
 				node = json_children(result);
 				(arg->has_get_peers ? parse_peers : parse_servers)(d, node);
@@ -1676,17 +1773,17 @@ parse_downloads(JSONNode const *result, UpdateArg *arg)
 		if (arg->has_get_options) {
 			result = json_next(result);
 			if (JSONT_OBJECT == json_type(result)) {
-				error_handler(result);
+				handle_error(result);
 			} else {
 				node = json_children(result);
-				parse_options(node, (parse_options_cb)parse_option, d);
+				parse_options(node, d);
 			}
 		}
 
 		if (arg->has_get_position) {
 			result = json_next(result);
 			if (JSONT_OBJECT == json_type(result)) {
-				error_handler(result);
+				handle_error(result);
 			} else {
 				node = json_children(result);
 				d->queue_index = node->num;
@@ -1715,7 +1812,7 @@ set_periodic_update(void)
 }
 
 static void
-update_handler(JSONNode const *result, UpdateArg *arg)
+handle_update(JSONNode const *result, UpdateArg *arg)
 {
 	if (!result)
 		goto out;
@@ -1742,7 +1839,7 @@ out:
 static int
 getmainheight(void)
 {
-	return LINES - 1/*status line*/;
+	return LINES - 1 /* Status line. */;
 }
 
 static void
@@ -1757,27 +1854,11 @@ update(void)
 	if (!(rpc = new_rpc()))
 		return;
 
-	rpc->handler = (RPCHandler)update_handler;
+	rpc->handler = (RPCHandler)handle_update;
 
-	json_write_key(jw, "method");
-	json_write_str(jw, "system.multicall");
+	begin_rpc_multicall();
 
-	json_write_key(jw, "params");
-	json_write_beginarr(jw); /* {{{ */
-	/* 1st arg: “methods” */
-	json_write_beginarr(jw); /* {{{ */
-
-	{
-		json_write_beginobj(jw);
-		json_write_key(jw, "methodName");
-		json_write_str(jw, "aria2.getGlobalStat");
-		json_write_key(jw, "params");
-		json_write_beginarr(jw);
-		/* “secret” */
-		json_write_str(jw, secret_token);
-		json_write_endarr(jw);
-		json_write_endobj(jw);
-	}
+	generate_rpc_multicall_method("aria2.getGlobalStat", NULL);
 
 	if (0 < num_downloads) {
 		Download **top;
@@ -1805,10 +1886,10 @@ update(void)
 		for (; dd < end; ++dd) {
 			Download *d = *dd;
 			bool visible = top <= dd && dd <= bot;
-			uint8_t keyidx = 0;
+			uint8_t num_keys = 0;
 			char *keys[20];
 
-#define WANT(key) keys[keyidx++] = key;
+#define WANT(key) keys[num_keys++] = key;
 
 			if (!d->initialized) {
 				WANT("bittorrent");
@@ -1873,28 +1954,16 @@ update(void)
 
 #undef WANT
 
-			if (!keyidx)
+			if (!num_keys)
 				continue;
 
-			json_write_beginobj(jw);
-			json_write_key(jw, "methodName");
-			json_write_str(jw, "aria2.tellStatus");
-			json_write_key(jw, "params");
+			begin_rpc_multicall_method("aria2.tellStatus", d);
+			/* "keys" */
 			json_write_beginarr(jw);
-			/* “secret” */
-			json_write_str(jw, secret_token);
-			/* “gid” */
-			json_write_str(jw, d->gid);
-			/* “keys” */
-			json_write_beginarr(jw);
-
-			while (0 < keyidx)
-				json_write_str(jw, keys[--keyidx]);
-
+			while (0 < num_keys)
+				json_write_str(jw, keys[--num_keys]);
 			json_write_endarr(jw);
-
-			json_write_endarr(jw);
-			json_write_endobj(jw);
+			end_rpc_multicall_method();
 
 			arg->download = ref_download(d);
 
@@ -1904,52 +1973,21 @@ update(void)
 			    (D_ACTIVE == abs(d->status) || d->status < 0) &&
 			    (d->name
 			    ? (arg->has_get_peers = ('p' == view))
-			    : (arg->has_get_servers = ('f' == view)))) {
-				json_write_beginobj(jw);
-				json_write_key(jw, "methodName");
-				json_write_str(jw, d->name ? "aria2.getPeers" : "aria2.getServers");
-				json_write_key(jw, "params");
-				json_write_beginarr(jw);
-				/* “secret” */
-				json_write_str(jw, secret_token);
-				/* “gid” */
-				json_write_str(jw, d->gid);
-				json_write_endarr(jw);
-				json_write_endobj(jw);
-			}
+			    : (arg->has_get_servers = ('f' == view))))
+				generate_rpc_multicall_method(d->name ? "aria2.getPeers" : "aria2.getServers", d);
 
 			if ((arg->has_get_options = (d->status < 0 || (!d->requested_options && visible)))) {
-				json_write_beginobj(jw);
-				json_write_key(jw, "methodName");
-				json_write_str(jw, "aria2.getOption");
-				json_write_key(jw, "params");
-				json_write_beginarr(jw);
-				/* “secret” */
-				json_write_str(jw, secret_token);
-				/* “gid” */
-				json_write_str(jw, d->gid);
-				json_write_endarr(jw);
-				json_write_endobj(jw);
-
+				generate_rpc_multicall_method("aria2.getOption", d);
 				d->requested_options = true;
 			}
 
 			if ((arg->has_get_position = (-D_WAITING == d->status))) {
-				json_write_beginobj(jw);
-				json_write_key(jw, "methodName");
-				json_write_str(jw, "aria2.changePosition");
-				json_write_key(jw, "params");
-				json_write_beginarr(jw);
-				/* “secret” */
-				json_write_str(jw, secret_token);
-				/* “gid” */
-				json_write_str(jw, d->gid);
-				/* “pos” */
+				begin_rpc_multicall_method("aria2.changePosition", d);
+				/* "pos" */
 				json_write_num(jw, 0);
-				/* “how” */
+				/* "how" */
 				json_write_str(jw, "POS_CUR");
-				json_write_endarr(jw);
-				json_write_endobj(jw);
+				end_rpc_multicall_method();
 			}
 
 			d->status = abs(d->status);
@@ -1959,9 +1997,7 @@ update(void)
 		rpc->arg = NULL;
 	}
 
-	json_write_endarr(jw); /* }}} */
-
-	json_write_endarr(jw); /* }}} */
+	end_rpc_multicall();
 
 	if (do_rpc(rpc))
 		periodic = NULL;
@@ -1969,7 +2005,7 @@ update(void)
 
 
 static void
-change_position_handler(JSONNode const *result, Download *d)
+handle_position_change(JSONNode const *result, Download *d)
 {
 	if (result) {
 		queue_changed();
@@ -1987,26 +2023,17 @@ static void
 change_position(Download *d, int32_t pos, int whence)
 {
 	RPCRequest *rpc;
-
 	if (!(rpc = new_rpc()))
 		return;
 
-	rpc->handler = (RPCHandler)change_position_handler;
+	rpc->handler = (RPCHandler)handle_position_change;
 	rpc->arg = ref_download(d);
 
-	json_write_key(jw, "method");
-	json_write_str(jw, "aria2.changePosition");
-
-	json_write_key(jw, "params");
-	json_write_beginarr(jw);
-	/* “secret” */
-	json_write_str(jw, secret_token);
-	/* “gid” */
-	json_write_str(jw, d->gid);
-	/* “pos” */
+	begin_rpc_method("aria2.changePosition", d);
+	/* "pos" */
 	json_write_int(jw, pos);
-	/* “how” */
-	char *how;
+	/* "how" */
+	char const *how;
 	switch (whence) {
 	case SEEK_SET: how = "POS_SET"; break;
 	case SEEK_CUR: how = "POS_CUR"; break;
@@ -2014,14 +2041,13 @@ change_position(Download *d, int32_t pos, int whence)
 	default: abort();
 	};
 	json_write_str(jw, how);
-
-	json_write_endarr(jw);
+	end_rpc_method();
 
 	do_rpc(rpc);
 }
 
 static void
-shutdown_handler(JSONNode const *result, UpdateArg *arg)
+handle_shutdown(JSONNode const *result, UpdateArg *arg)
 {
 	(void)arg;
 
@@ -2031,159 +2057,126 @@ shutdown_handler(JSONNode const *result, UpdateArg *arg)
 	exit(EXIT_SUCCESS);
 }
 
-static void
-shutdown_aria(int force)
+static Selection *
+get_selection(bool all)
 {
-	RPCRequest *rpc;
-
-	if (!(rpc = new_rpc()))
-		return;
-
-	rpc->handler = (RPCHandler)shutdown_handler;
-
-	json_write_key(jw, "method");
-	json_write_str(jw, force ? "aria2.forceShutdown" : "aria2.shutdown");
-
-	json_write_key(jw, "params");
-	json_write_beginarr(jw);
-	/* “secret” */
-	json_write_str(jw, secret_token);
-	json_write_endarr(jw);
-
-	do_rpc(rpc);
-}
-
-static void
-action_exit(JSONNode const *result, void *arg)
-{
-	(void)result, (void)arg;
-	exit(EXIT_SUCCESS);
-}
-
-static void
-pause_download(Download *d, bool pause, bool force)
-{
-	RPCRequest *rpc;
-
-	if (!(rpc = new_rpc()))
-		return;
-
-	if (MODE_VISUAL != mode.type)
-		rpc->handler = action_exit;
-
-	if (!mode.num_sel || d) {
-		json_write_key(jw, "method");
-
-		json_write_str(jw,
-			d
-			? (pause ? (force ? "aria2.forcePause" : "aria2.pause") : "aria2.unpause")
-			: (pause ? (force ? "aria2.forcePauseAll" : "aria2.pauseAll") : "aria2.unpauseAll"));
-
-		json_write_key(jw, "params");
-		json_write_beginarr(jw);
-
-		/* “secret” */
-		json_write_str(jw, secret_token);
-		if (d) {
-			/* “gid” */
-			json_write_str(jw, d->gid);
-		}
-
-		json_write_endarr(jw);
+	Download **dd, **end;
+	if (all || !num_downloads) {
+		dd = downloads;
+		end = &downloads[num_downloads];
 	} else {
-		Download **dd = downloads;
-		Download **end = &downloads[num_downloads];
-
-		json_write_key(jw, "method");
-		json_write_str(jw, "system.multicall");
-
-		json_write_key(jw, "params");
-		json_write_beginarr(jw);
-		/* 1st arg: “methods” */
-		json_write_beginarr(jw);
-
-		for (; dd < end; ++dd) {
-			json_write_beginobj(jw);
-			json_write_key(jw, "methodName");
-			json_write_str(jw, pause ? (force ? "aria2.forcePause" : "aria2.pause") : "aria2.unpause");
-			json_write_key(jw, "params");
-			json_write_beginarr(jw);
-
-			/* “secret” */
-			json_write_str(jw, secret_token);
-			/* “gid” */
-			json_write_str(jw, (*dd)->gid);
-
-			json_write_endarr(jw);
-			json_write_endobj(jw);
-		}
-
-		json_write_endarr(jw);
-		json_write_endarr(jw);
+		dd = &downloads[selidx];
+		end = dd + 1;
 	}
 
+	size_t count = (size_t)(end - dd);
+
+	Selection *s;
+	if (!(s = malloc(offsetof(Selection, downloads[count]))))
+		abort();
+
+	s->count = count;
+
+	for (size_t i = 0; i < count; ++i) {
+		Download *d = dd[i];
+		s->downloads[i] = ref_download(d);
+	}
+
+	return s;
+}
+
+static void
+generate_rpc_for_selection(RPCRequest *rpc, Selection *s, char const *method)
+{
+	rpc->arg = s;
+
+	begin_rpc_multicall();
+
+	for (size_t i = 0; i < s->count; ++i) {
+		Download *d = s->downloads[i];
+
+		generate_rpc_multicall_method(method, d);
+	}
+
+	end_rpc_multicall();
+
+}
+
+static void
+generate_rpc_for_selected(RPCRequest *rpc, bool all, char const *method)
+{
+	Selection *s = get_selection(all);
+	generate_rpc_for_selection(rpc, s, method);
+}
+
+static void
+pause_download(bool all, bool pause)
+{
+	RPCRequest *rpc;
+	if (!(rpc = new_rpc()))
+		return;
+
+	if (!num_selects && all)
+		generate_rpc_method(pause
+				? (do_forced ? "aria2.forcePauseAll" : "aria2.pauseAll")
+				: "aria2.unpauseAll");
+	else
+		generate_rpc_for_selected(rpc, all, pause
+				? (do_forced ? "aria2.forcePause" : "aria2.pause")
+				: "aria2.unpause");
+
 	do_rpc(rpc);
 }
 
 static void
-purge_download_handler(JSONNode const *result, Download *d)
+free_selection(Selection *s)
+{
+	if (!s)
+		return;
+
+	for (size_t i = 0; i < s->count; ++i)
+		unref_download(s->downloads[i]);
+	free(s);
+}
+
+static void
+handle_download_purge(JSONNode const *result, Selection *s)
 {
 	if (result) {
-		Download **dd;
-
-		if (d) {
+		for (size_t i = 0; i < s->count; ++i) {
+			Download *d = s->downloads[i], **dd;
 			if (upgrade_download(d, &dd))
-				delete_download_at(dd);
-		} else {
-			Download **end = &downloads[num_downloads];
-
-			for (dd = downloads; dd < end;) {
 				switch (abs((*dd)->status)) {
 				case D_COMPLETE:
 				case D_ERROR:
 				case D_REMOVED:
 					delete_download_at(dd);
-					--end;
 					break;
-
-				default:
-					++dd;
 				}
-			}
 		}
 
 		on_downloads_change(true);
 		refresh();
 	}
 
-	unref_download(d);
+	free_selection(s);
 }
 
 static void
-purge_download(Download *d)
+purge_download(bool all)
 {
 	RPCRequest *rpc;
 
 	if (!(rpc = new_rpc()))
 		return;
 
-	rpc->handler = (RPCHandler)purge_download_handler;
-	rpc->arg = ref_download(d);
+	rpc->handler = (RPCHandler)handle_download_purge;
+	rpc->arg = get_selection(all);
 
-	json_write_key(jw, "method");
-	json_write_str(jw, d ? "aria2.removeDownloadResult" : "aria2.purgeDownloadResult");
-
-	json_write_key(jw, "params");
-	json_write_beginarr(jw);
-
-	/* “secret” */
-	json_write_str(jw, secret_token);
-	if (d) {
-		/* “gid” */
-		json_write_str(jw, d->gid);
-	}
-
-	json_write_endarr(jw);
+	if (!num_selects && all)
+		generate_rpc_method("aria2.purgeDownloadResult");
+	else
+		generate_rpc_for_selected(rpc, all, "aria2.removeDownloadResult");
 
 	do_rpc(rpc);
 }
@@ -2635,8 +2628,8 @@ draw_download(Download const *d, bool draw_parents, int *y)
 			addspaces(5);
 
 		if (0 < d->num_files) {
-			if (d->num_files != d->num_selfiles) {
-				n = fmt_number(fmtbuf, d->num_selfiles);
+			if (d->num_files != d->num_files_selected) {
+				n = fmt_number(fmtbuf, d->num_files_selected);
 				addnstr(fmtbuf, n);
 
 				addstr("/");
@@ -2668,9 +2661,9 @@ draw_download(Download const *d, bool draw_parents, int *y)
 		if (0 < global.num_download_limited)
 			addspaces(5);
 
-		n = fmt_number(fmtbuf, d->num_selfiles);
+		n = fmt_number(fmtbuf, d->num_files_selected);
 		addnstr(fmtbuf, n);
-		addstr(1 == d->num_selfiles ? " file " : " files");
+		addstr(1 == d->num_files_selected ? " file " : " files");
 		if (0 < global.num_upload_limited)
 			addspaces(6);
 		break;
@@ -3026,8 +3019,9 @@ draw_statusline(void)
 	move(y, 0);
 	attr_set(A_NORMAL, 0, NULL);
 
-	printw("%c %4d/%d",
+	printw("%c%c %4d/%d",
 			view,
+			num_selects ? '=' : '\0',
 			0 < num_downloads ? selidx + 1 : 0, num_downloads);
 
 	for (i = D_UNKNOWN; i < D_NB; ++i) {
@@ -3074,7 +3068,7 @@ draw_statusline(void)
 		mvaddstr(y, x -= 1, "/");
 	}
 
-	speed = !mode.num_sel ? global.upload_speed : global.upload_speed_total;
+	speed = !num_selects ? global.upload_speed : global.upload_speed_total;
 	if (0 < speed)
 		attr_set(A_BOLD, COLOR_UP, NULL);
 	n = fmt_speed(fmtbuf, speed);
@@ -3107,7 +3101,7 @@ skip_upload:
 		mvaddstr(y, x -= 1, "/");
 	}
 
-	speed = !mode.num_sel ? global.download_speed : global.download_speed_total;
+	speed = !num_selects ? global.download_speed : global.download_speed_total;
 	if (0 < speed)
 		attr_set(A_BOLD, COLOR_DOWN, NULL);
 	n = fmt_speed(fmtbuf, speed);
@@ -3136,23 +3130,7 @@ draw_all(void)
 }
 
 static void
-print_gid(Download const *d)
-{
-	fprintf(stdout, "%s\n", d->gid);
-}
-
-static void
-foreach_download(void(*cb)(Download const *))
-{
-	Download **dd = downloads;
-	Download **end = &downloads[num_downloads];
-
-	for (dd = downloads; dd < end; ++dd)
-		cb(*dd);
-}
-
-static void
-update_all_handler(JSONNode const *result, void *arg)
+handle_update_all(JSONNode const *result, void *arg)
 {
 	size_t download_index = 0;
 
@@ -3172,13 +3150,16 @@ update_all_handler(JSONNode const *result, void *arg)
 		JSONNode const *node;
 
 		if (JSONT_ARRAY != json_type(result)) {
-			error_handler(result);
+			handle_error(result);
 			continue;
 		}
 
 		downloads_list = json_children(result);
 
-		for (node = json_first(downloads_list); node; node = json_next(node)) {
+		for (node = json_first(downloads_list);
+		     node;
+		     node = json_next(node))
+		{
 			Download *d;
 			/* XXX: parse_download's belongsTo and followedBy may
 			 * create the download before this update arrives, so
@@ -3202,39 +3183,12 @@ update_all_handler(JSONNode const *result, void *arg)
 
 	} while ((result = json_next(result)));
 
-	switch (mode.type) {
-	case MODE_VISUAL:
-		/* no-op */
-		break;
+	on_downloads_change(false);
+	refresh();
 
-	case MODE_ADD_DOWNLOADS:
-	case MODE_SHUTDOWN:
-		/* handled earlier */
-		break;
-
-	case MODE_PRINT_GID:
-		foreach_download(print_gid);
-		exit(EXIT_SUCCESS);
-		break;
-
-	case MODE_PAUSE:
-	case MODE_UNPAUSE:
-		pause_download(NULL, MODE_PAUSE == mode.type, do_forced);
-		break;
-
-	case MODE_PURGE:
-		purge_download(NULL);
-		break;
-	}
-
-	if (MODE_VISUAL == mode.type) {
-		on_downloads_change(0);
-		refresh();
-
-		/* schedule updates and request one now immediately */
-		set_periodic_update();
-		update();
-	}
+	/* Schedule updates and request one now. */
+	set_periodic_update();
+	update();
 }
 
 static void
@@ -3269,8 +3223,31 @@ begwin(void)
  * - =0: mode executed and terminated successfully.
  * - >0: mode executed but failed. */
 static int
+xwaitpid(pid_t pid)
+{
+	for (;;) {
+		int status;
+		if (waitpid(pid, &status, 0) < 0) {
+			if (EINTR == errno)
+				continue;
+
+			return 1;
+		}
+
+		if (WIFEXITED(status) && 127 == WEXITSTATUS(status))
+			return -1;
+		else if (WIFEXITED(status) && EXIT_SUCCESS == WEXITSTATUS(status))
+			return 0;
+		else
+			return 1;
+	}
+}
+
+static int
 run_action(Download *d, char const *name, ...)
 {
+	clear_error();
+
 	char filename[NAME_MAX];
 	char pathname[PATH_MAX];
 	va_list ap;
@@ -3299,22 +3276,18 @@ run_action(Download *d, char const *name, ...)
 		_exit(127);
 	}
 
-	int status;
-	while (waitpid(pid, &status, 0) < 0 && EINTR == errno);
+	int ret = xwaitpid(pid);
 
 	/* Become foreground process. */
 	tcsetpgrp(STDERR_FILENO, getpgrp());
 	begwin();
 
-	if (WIFEXITED(status) && 127 == WEXITSTATUS(status)) {
-		return -1;
-	} else if (WIFEXITED(status) && EXIT_SUCCESS == WEXITSTATUS(status)) {
+	if (!ret) {
 		runaction_maychanged(d);
 		refresh();
-		return EXIT_SUCCESS;
-	} else {
-		return EXIT_FAILURE;
 	}
+
+	return ret;
 }
 
 static char *
@@ -3328,20 +3301,20 @@ b64_enc_file(char const *pathname)
 
 	struct stat st;
 	if (fstat(fd, &st) < 0)
-		goto out_close;
+		goto out;
 
 	uint8_t *buf = mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
 	if (MAP_FAILED == buf)
-		goto out_close;
+		goto out;
 
 	size_t b64_size;
 	b64 = b64_enc(buf, st.st_size, &b64_size);
 
 	munmap(buf, st.st_size);
 
-out_close:
-	close(fd);
 out:
+	if (0 <= fd)
+		close(fd);
 	return b64;
 }
 
@@ -3366,176 +3339,253 @@ fileout(bool must_edit)
 		_exit(127);
 	}
 
-	int status;
-	while (waitpid(pid, &status, 0) < 0 && EINTR == errno)
-		;
+	int ret = xwaitpid(pid);
 
 	begwin();
 
-	return WIFEXITED(status) && EXIT_SUCCESS == WEXITSTATUS(status)
-		? EXIT_SUCCESS
-		: EXIT_FAILURE;
+	return ret;
 }
 
 static void
-write_option(char const *option, char const *value, FILE *stream)
+print_option(JSONNode const *option, FILE *stream)
 {
-	fprintf(stream, "%s=%s\n", option, value);
+	if (stream)
+		fprintf(stream, "%s=%s\n", option->key, option->str);
 }
 
 static void
-fetch_options_handler(JSONNode const *result, Download *d)
+print_download(Download const *d, FILE *stream)
 {
-	if (result) {
-		clear_error_msg();
+	static char const *const STATUS_MAP[D_NB] = {
+		[D_UNKNOWN] = "unknown",
+		[D_WAITING] = "waiting",
+		[D_ACTIVE] = "active",
+		[D_PAUSED] = "paused",
+		[D_COMPLETE] = "complete",
+		[D_REMOVED] = "removed",
+		[D_ERROR] = "error",
+	};
 
-		if (!d || upgrade_download(d, NULL)) {
-			parse_options(result, (parse_options_cb)parse_option, d);
+	fprintf(stream, "%s\t%s\t%d\t",
+			d->gid,
+			STATUS_MAP[d->status],
+			d->total ? (int)(d->have * 100 / d->total) : -1);
 
-			draw_main();
-			refresh();
+	if (longest_tag)
+		fprintf(stream, "%s\t", d->tags ? d->tags : "");
+
+	fprintf(stream, "%s\n", d->display_name);
+}
+
+static void
+parse_selection_options(JSONNode const *result, Selection const *s, FILE *stream)
+{
+	if (!s) {
+		for (JSONNode const *option = json_first(result);
+		     option;
+		     option = json_next(option))
+		{
+			parse_option(option->key, option->str, NULL);
+			print_option(option, stream);
+		}
+	} else {
+		size_t i = 0;
+		assert(json_length(result) == s->count);
+		for (JSONNode const *node = json_first(result);
+		     node;
+		     (node = json_next(node)), ++i)
+		{
+			Download *d = s->downloads[i];
+			if (!upgrade_download(d, NULL))
+				continue;
+
+			if (stream) {
+				fputs("# ", stream);
+				print_download(d, stream);
+			}
+
+			JSONNode const *options = json_children(node);
+			for (JSONNode const *option = json_first(options);
+			     option;
+			     option = json_next(option))
+			{
+				parse_option(option->key, option->str, d);
+				print_option(option, stream);
+			}
+
+			if (stream)
+				fputc('\n', stream);
 		}
 	}
-
-	unref_download(d);
 }
 
 static void
-change_option_handler(JSONNode const *result, Download *d)
+handle_option_update(JSONNode const *result, Selection *s)
+{
+	if (result) {
+		parse_selection_options(result, s, NULL);
+		draw_main();
+		refresh();
+	}
+
+	free_selection(s);
+}
+
+static void
+handle_option_change(JSONNode const *result, Selection *s)
 {
 	if (result)
-		fetch_options(d, false);
-
-	unref_download(d);
+		fetch_options(s, false /* Ignored. */, false);
+	else
+		free_selection(s);
 }
 
-/* show received download or global options to user */
-static void
-show_options_handler(JSONNode const *result, Download *d)
+static FILE *
+open_input(void)
 {
-	FILE *s;
-	RPCRequest *rpc;
+	FILE *ret;
+	if (!(ret = fopen(session_file, "r")))
+		show_error("Failed to read session file: %s",
+				strerror(errno));
+	return ret;
+}
 
-	if (!result)
-		goto out;
+static FILE *
+open_output(void)
+{
+	FILE *ret;
+	if (!(ret = fopen(session_file, "w")))
+		show_error("Failed to write session file: %s",
+				strerror(errno));
+	return ret;
+}
 
-	clear_error_msg();
-
-	if (d && !upgrade_download(d, NULL))
-		goto out;
-
-	if (!(s = fopen(session_file, "w")))
-		goto out;
-
-	parse_options(result, (parse_options_cb)write_option, s);
-	parse_options(result, (parse_options_cb)parse_option, d);
-
-	fclose(s);
-
-	int status;
-	if ((status = run_action(NULL, d ? "i" : "I")) < 0)
-		status = fileout(false);
-
-	if (EXIT_SUCCESS != status)
-		goto out;
-
-	if (!(s = fopen(session_file, "r")))
-		goto out;
-
-	if (!(rpc = new_rpc()))
-		goto out_fclose;
-
-	rpc->handler = (RPCHandler)change_option_handler;
-	rpc->arg = ref_download(d);
-
-	json_write_key(jw, "method");
-	json_write_str(jw, d ? "aria2.changeOption" : "aria2.changeGlobalOption");
-
-	json_write_key(jw, "params");
-	json_write_beginarr(jw);
-
-	/* “secret” */
-	json_write_str(jw, secret_token);
-	if (d)
-		/* “gid” */
-		json_write_str(jw, d->gid);
-	/* “options” */
-	json_write_beginobj(jw);
-
+/* TODO: Not sure if it is the most efficient way to do this. */
+static void
+generate_options_from_stream(FILE *stream)
+{
 	char *line = NULL;
 	size_t line_size = 0;
 	ssize_t line_len;
 
-	while (0 <= (line_len = getline(&line, &line_size, s))) {
-		char *name, *value;
+	fseek(stream, 0, SEEK_SET);
 
-		name = line;
-		if (!(value = strchr(name, '=')))
+	/* "options" */
+	json_write_beginobj(jw);
+
+	while (0 <= (line_len = getline(&line, &line_size, stream))) {
+		char *name = line, *value;
+		if ('#' == line[0] ||
+		    !(value = strchr(name, '=')))
 			continue;
 		*value++ = '\0';
 
-		if (line[line_len - 1] == '\n')
-			line[line_len - 1] = '\0';
+		if ('\n' == line[line_len - 1])
+			line[--line_len] = '\0';
 
 		json_write_key(jw, name);
 		json_write_str(jw, value);
 	}
 
 	json_write_endobj(jw);
-	json_write_endarr(jw);
 
 	free(line);
-
-	do_rpc(rpc);
-
-out_fclose:
-	fclose(s);
-
-out:
-	unref_download(d);
 }
 
-/* if user requested it, show it. otherwise just update returned values in the
- * background */
+/* Display retrieved options to user for edit. */
 static void
-fetch_options(Download *d, bool user)
+handle_option_show(JSONNode const *result, Selection *s)
 {
-	RPCRequest *rpc;
+	RPCRequest *rpc = NULL;
+
+	if (!result)
+		goto out;
 
 	if (!(rpc = new_rpc()))
-		return;
+		goto out;
 
-	rpc->handler = (RPCHandler)(user ? show_options_handler : fetch_options_handler);
-	rpc->arg = ref_download(d);
+	FILE *stream;
+	if (!(stream = open_output()))
+		goto out;
 
-	json_write_key(jw, "method");
-	json_write_str(jw, d ? "aria2.getOption" : "aria2.getGlobalOption");
+	parse_selection_options(result, s, stream);
+	fclose(stream);
 
-	json_write_key(jw, "params");
-	json_write_beginarr(jw);
-	/* “secret” */
-	json_write_str(jw, secret_token);
-	if (d) {
-		/* “gid” */
-		json_write_str(jw, d->gid);
+	int status;
+	if ((status = run_action(NULL, s ? "i" : "I")) < 0)
+		status = fileout(false);
+
+	if (status)
+		goto out;
+
+	rpc->handler = (RPCHandler)handle_option_change;
+
+	if (!(stream = open_input()))
+		goto out;
+
+	/* TODO: Maybe options should be requested again and only altered
+	 * options should be uploaded? */
+	rpc->arg = s;
+	if (!s) {
+		begin_rpc_method("aria2.changeGlobalOption", NULL);
+		generate_options_from_stream(stream);
+		end_rpc_method();
+	} else {
+		begin_rpc_multicall();
+
+		for (size_t i = 0; i < s->count; ++i) {
+			Download *d = s->downloads[i];
+			begin_rpc_multicall_method("aria2.changeOption", d);
+			generate_options_from_stream(stream);
+			end_rpc_multicall_method();
+		}
+
+		end_rpc_multicall();
 	}
-	json_write_endarr(jw);
+	s = NULL;
+
+	do_rpc(rpc);
+	rpc = NULL;
+
+out:
+	if (rpc)
+		free_rpc(rpc);
+	free_selection(s);
+}
+
+/* If requested by user, display returned options. Otherwise just update them. */
+static void
+fetch_options(Selection *s, bool all, bool user)
+{
+	RPCRequest *rpc;
+	if (!(rpc = new_rpc())) {
+		free_selection(s);
+		return;
+	}
+
+	rpc->handler = (RPCHandler)(user ? handle_option_show : handle_option_update);
+	rpc->arg = NULL;
+
+	if (s)
+		generate_rpc_for_selection(rpc, s, "aria2.getOption");
+	else if (!num_selects && all)
+		generate_rpc_method("aria2.getGlobalOption");
+	else
+		generate_rpc_for_selected(rpc, all, "aria2.getOption");
 
 	do_rpc(rpc);
 }
 
 static void
-show_options(Download *d)
+show_options(bool all)
 {
-	fetch_options(d, true);
+	fetch_options(NULL, all, true);
 }
 
-/* select (last) newly added download and write back errorneous files */
+/* Select (last) newly added download and write back errorneous files. */
 static void
-add_downloads_handler(JSONNode const *result, void *arg)
+handle_download_add(JSONNode const *result, void *arg)
 {
-	bool ok = true;
-
 	(void)arg;
 
 	if (!result)
@@ -3545,8 +3595,7 @@ add_downloads_handler(JSONNode const *result, void *arg)
 		Download **dd;
 
 		if (JSONT_OBJECT == json_type(result)) {
-			ok = false;
-			error_handler(result);
+			handle_error(result);
 		} else {
 			JSONNode const *gid = json_children(result);
 
@@ -3562,63 +3611,39 @@ add_downloads_handler(JSONNode const *result, void *arg)
 		}
 	}
 
-	switch (mode.type) {
-	case MODE_ADD_DOWNLOADS:
-		exit(ok ? EXIT_SUCCESS : EXIT_FAILURE);
-		break;
-
-	case MODE_VISUAL:
-		on_downloads_change(1);
-		refresh();
-		break;
-
-	default:
-		/* no-op */
-		break;
-	}
+	on_downloads_change(true);
+	refresh();
 }
 
 static void
 add_downloads(char cmd)
 {
 	RPCRequest *rpc;
-	FILE *s;
+	if (!(rpc = new_rpc()))
+		return;
+
 	int status;
+	if ((status = run_action(NULL, "%c", cmd)) < 0)
+		status = fileout(true);
 
-	if (cmd) {
-		if ((status = run_action(NULL, "%c", cmd)) < 0)
-			status = fileout(true);
-
-		if (EXIT_SUCCESS != status)
-			return;
-
-		clear_error_msg();
-
-		if (!(s = fopen(session_file, "r")))
-			return;
-	} else {
-		s = stdin;
+	FILE *stream;
+	if (status ||
+	   !(stream = open_input()))
+	{
+		free_rpc(rpc);
+		return;
 	}
 
-	if (!(rpc = new_rpc()))
-		goto out_fclose;
+	rpc->handler = (RPCHandler)handle_download_add;
 
-	rpc->handler = (RPCHandler)add_downloads_handler;
-
-	json_write_key(jw, "method");
-	json_write_str(jw, "system.multicall");
-
-	json_write_key(jw, "params");
-	json_write_beginarr(jw);
-	/* 1st arg: “methods” */
-	json_write_beginarr(jw); /* {{{ */
+	begin_rpc_multicall();
 
 	char *line = NULL;
 	size_t line_size = 0;
 	ssize_t line_len;
 
 	for (;;) {
-		if ((line_len = getline(&line, &line_size, s)) < 0)
+		if ((line_len = getline(&line, &line_size, stream)) < 0)
 			break;
 
 		char *uri, *next_uri;
@@ -3635,43 +3660,32 @@ add_downloads(char cmd)
 		if ((next_uri = strchr(uri, '\t')))
 			*next_uri++ = '\0';
 
-#define ISSUFFIX(lit) \
+#define IS_SUFFIX(lit) \
 	((size_t)line_len > ((sizeof lit) - 1) && \
 		 !memcmp(uri + (size_t)line_len - ((sizeof lit) - 1), lit, (sizeof lit) - 1))
 
-		if (ISSUFFIX(".torrent"))
+		if (IS_SUFFIX(".torrent"))
 			type = TORRENT;
-		else if (ISSUFFIX(".meta4") || ISSUFFIX(".metalink"))
+		else if (IS_SUFFIX(".meta4") || IS_SUFFIX(".metalink"))
 			type = METALINK;
 		else
 			type = URI;
 
 		if (type != URI && !(b64str = b64_enc_file(uri)))
 			type = URI;
-#undef ISSUFFIX
+#undef IS_SUFFIX
 
-		json_write_beginobj(jw);
-
-		json_write_key(jw, "methodName");
+		char const *method;
 		switch (type) {
-		case TORRENT:
-			json_write_str(jw, "aria2.addTorrent");
-			break;
-
-		case METALINK:
-			json_write_str(jw, "aria2.addMetalink");
-			break;
-
-		case URI:
-			json_write_str(jw, "aria2.addUri");
-			break;
+		case TORRENT:  method = "aria2.addTorrent"; break;
+		case METALINK: method = "aria2.addMetalink"; break;
+		case URI:      method = "aria2.addUri"; break;
+		default: abort();
 		}
 
-		json_write_key(jw, "params");
-		json_write_beginarr(jw);
-		/* “secret” */
-		json_write_str(jw, secret_token);
-		/* “data” */
+		begin_rpc_multicall_method(method, NULL);
+
+		/* "data" */
 		switch (type) {
 		case TORRENT:
 		case METALINK:
@@ -3694,7 +3708,7 @@ add_downloads(char cmd)
 			break;
 		}
 		if (TORRENT == type) {
-			/* “uris” */
+			/* "uris" */
 			json_write_beginarr(jw);
 			while (next_uri) {
 				uri = next_uri;
@@ -3705,24 +3719,25 @@ add_downloads(char cmd)
 			}
 			json_write_endarr(jw);
 		}
-		/* “options” */
+		/* "options" */
 		json_write_beginobj(jw);
-		while (0 <= (line_len = getline(&line, &line_size, s))) {
-			char *name, *value;
-
+		while (0 <= (line_len = getline(&line, &line_size, stream))) {
 			if (line_len <= 0)
 				continue;
 
 			if (line[line_len - 1] == '\n')
 				line[--line_len] = '\0';
 
-			for (name = line; isspace(*name); )
+			char *name = line;
+			while (isspace(*name))
 				++name;
 
-			/* no leading spaces */
+			/* No leading spaces, not an option. */
 			if (name == line)
 				break;
 
+			/* No equal sign, not an option. */
+			char *value;
 			if (!(value = strchr(name, '=')))
 				break;
 			*value++ = '\0';
@@ -3733,75 +3748,52 @@ add_downloads(char cmd)
 
 		/* (none) */
 		json_write_endobj(jw);
-		/* “position” */
-		/* insert position at specified queue index */
-		/* do not care if it’s bigger, it will be added to the end */
+		/* "position" */
+		/* Insert position at specified queue index. */
+		/* Do not care if it's bigger, it will be added at the end. */
 		json_write_num(jw, selidx);
 
-		json_write_endarr(jw);
-
-		json_write_endobj(jw);
+		end_rpc_multicall_method();
 	}
 
 	free(line);
+	fclose(stream);
 
-	json_write_endarr(jw); /* }}} */
-	json_write_endarr(jw);
+	end_rpc_multicall();
 
 	do_rpc(rpc);
-
-out_fclose:
-	fclose(s);
 }
 
 static void
 update_all(void)
 {
-	unsigned n;
 	RPCRequest *rpc;
-
 	if (!(rpc = new_rpc()))
 		return;
 
-	rpc->handler = update_all_handler;
+	rpc->handler = handle_update_all;
 
-	json_write_key(jw, "method");
-	json_write_str(jw, "system.multicall");
+	begin_rpc_multicall();
 
-	json_write_key(jw, "params");
-	json_write_beginarr(jw);
-	/* 1st arg: “methods” */
-	json_write_beginarr(jw); /* {{{ */
+	generate_rpc_multicall_method("aria2.getGlobalStat", NULL);
 
-	{
-		json_write_beginobj(jw);
-		json_write_key(jw, "methodName");
-		json_write_str(jw, "aria2.getGlobalStat");
-		json_write_key(jw, "params");
-		json_write_beginarr(jw);
-		/* “secret” */
-		json_write_str(jw, secret_token);
-		json_write_endarr(jw);
-		json_write_endobj(jw);
-	}
-
-	for (n = 0;;++n) {
-		char *tell;
+	for (int n = 0;; ++n) {
+		char const *method;
 		bool pageable;
 
 		switch (n) {
 		case 0:
-			tell = "aria2.tellWaiting";
+			method = "aria2.tellWaiting";
 			pageable = true;
 			break;
 
 		case 1:
-			tell = "aria2.tellActive";
+			method = "aria2.tellActive";
 			pageable = false;
 			break;
 
 		case 2:
-			tell = "aria2.tellStopped";
+			method = "aria2.tellStopped";
 			pageable = true;
 			break;
 
@@ -3809,110 +3801,104 @@ update_all(void)
 			goto out_of_loop;
 		}
 
-		json_write_beginobj(jw);
-
-		json_write_key(jw, "methodName");
-		json_write_str(jw, tell);
-
-		json_write_key(jw, "params");
-		json_write_beginarr(jw);
-
-		/* “secret” */
-		json_write_str(jw, secret_token);
+		begin_rpc_multicall_method(method, NULL);
 
 		if (pageable) {
-			/* “offset” */
+			/* "offset" */
 			json_write_int(jw, 0);
 
-			/* “num” */
+			/* "num" */
 			json_write_int(jw, 99999);
 		}
 
-		/* “keys” {{{ */
+		/* "keys" {{{ */
 		json_write_beginarr(jw);
 		json_write_str(jw, "gid");
 		json_write_str(jw, "status");
 		json_write_str(jw, "errorMessage");
-		if (MODE_VISUAL == mode.type) {
-			json_write_str(jw, "totalLength");
-			json_write_str(jw, "completedLength");
-			json_write_str(jw, "uploadLength");
-			json_write_str(jw, "verifiedLength");
-			json_write_str(jw, "verifyIntegrityPending");
-			json_write_str(jw, "uploadSpeed");
-			json_write_str(jw, "downloadSpeed");
+		json_write_str(jw, "totalLength");
+		json_write_str(jw, "completedLength");
+		json_write_str(jw, "uploadLength");
+		json_write_str(jw, "verifiedLength");
+		json_write_str(jw, "verifyIntegrityPending");
+		json_write_str(jw, "uploadSpeed");
+		json_write_str(jw, "downloadSpeed");
 
-			json_write_str(jw, "bittorrent");
-			json_write_str(jw, "numPieces");
-			json_write_str(jw, "pieceLength");
-			json_write_str(jw, "following");
-			json_write_str(jw, "belongsTo");
-		}
-		if (MODE_VISUAL == mode.type ? is_local : mode.use_files)
+		json_write_str(jw, "bittorrent");
+		json_write_str(jw, "numPieces");
+		json_write_str(jw, "pieceLength");
+		json_write_str(jw, "following");
+		json_write_str(jw, "belongsTo");
+		if (is_local || select_need_files)
 			json_write_str(jw, "files");
 		json_write_endarr(jw);
 		/* }}} */
 
-		json_write_endarr(jw);
-		json_write_endobj(jw);
+		end_rpc_multicall_method();
 	}
 out_of_loop:
 
-	json_write_endarr(jw); /* }}} */
-	json_write_endarr(jw);
+	end_rpc_multicall();
 
 	do_rpc(rpc);
 }
 
 static void
-remove_download_handler(JSONNode const *result, Download *d)
+handle_download_remove(JSONNode const *result, Selection *s)
 {
 	if (result) {
-		Download **dd;
+		for (size_t i = 0; i < s->count; ++i) {
+			Download *d = s->downloads[i], **dd;
 
-		if (upgrade_download(d, &dd)) {
-			delete_download_at(dd);
-
-			on_downloads_change(1);
-			refresh();
+			if (upgrade_download(d, &dd))
+				delete_download_at(dd);
 		}
+
+		on_downloads_change(true);
+		refresh();
 	}
 
-	unref_download(d);
+	free_selection(s);
 }
 
 static void
-remove_download(Download *d, bool force)
+remove_download(void)
 {
 	RPCRequest *rpc;
-
-	if (0 <= run_action(d, "D"))
-		return;
-
-	if (D_ACTIVE == abs(d->status)) {
-		show_error("Refusing to delete active download");
-		draw_statusline();
-		return;
-	}
-
 	if (!(rpc = new_rpc()))
 		return;
 
-	rpc->handler = (RPCHandler)remove_download_handler;
-	rpc->arg = ref_download(d);
+	Selection *s = get_selection(false);
 
-	json_write_key(jw, "method");
-	json_write_str(jw, force ? "aria2.forceRemove" : "aria2.remove");
+	rpc->handler = (RPCHandler)handle_download_remove;
+	rpc->arg = s;
 
-	json_write_key(jw, "params");
-	json_write_beginarr(jw);
-	/* “secret” */
-	json_write_str(jw, secret_token);
-	/* “gid” */
-	json_write_str(jw, d->gid);
-	json_write_endarr(jw);
+	begin_rpc_multicall();
+
+	for (size_t i = 0; i < s->count; ++i) {
+		Download *d = s->downloads[i];
+
+		int res = run_action(d, "D");
+		/* Custom action succeed. */
+		if (!res)
+			continue;
+		/* Custom action failed, avoid further deletions. */
+		else if (0 < res)
+			break;
+
+		if (D_ACTIVE == abs(d->status)) {
+			show_error("Refusing to delete active download");
+			continue;
+		}
+
+		generate_rpc_multicall_method(do_forced ? "aria2.forceRemove" : "aria2.remove", d);
+	}
+
+	end_rpc_multicall();
 
 	do_rpc(rpc);
+
+	draw_statusline();
 }
 
 static void
@@ -3952,9 +3938,8 @@ jump_prev_group(void)
 			if (status != abs((*dd)->status)) {
 				status = abs((*dd)->status);
 
-				/* go to the first download of the group */
-				while (lim <= --dd && status == abs((*dd)->status))
-					;
+				/* Go to the first download of the group. */
+				while (lim <= --dd && status == abs((*dd)->status));
 
 				select_download(dd[1]);
 				break;
@@ -3980,24 +3965,139 @@ jump_next_group(void)
 	}
 }
 
+typedef struct {
+	Selection *s;
+	size_t num_has_tell_status;
+} FetchFilesArg;
+
 static void
-select_files(Download *d)
+select_files(Selection *s, bool all);
+
+static void
+handle_fetch_files(JSONNode const *result, FetchFilesArg *arg)
 {
-	FILE *s;
+	if (result) {
+		size_t i = 0;
+		assert(json_length(result) == arg->num_has_tell_status);
+		for (JSONNode const *node = json_first(result);
+		     node;
+		     (node = json_next(node)), ++i)
+		{
+			Download *d = arg->s->downloads[i];
 
-	if (!(s = fopen(session_file, "w")))
+			if (JSONT_OBJECT == json_type(node)) {
+				Download **dd;
+				if (upgrade_download(d, &dd))
+					delete_download_at(dd);
+				continue;
+			}
+
+			parse_download(d, json_children(node));
+		}
+
+		on_downloads_change(true);
+		refresh();
+
+		select_files(arg->s, false /* Ignored. */);
+	} else {
+		free_selection(arg->s);
+	}
+
+	free(arg);
+}
+
+static void
+fetch_files(Selection *s)
+{
+	RPCRequest *rpc;
+	if (!(rpc = new_rpc())) {
+		free_selection(s);
 		return;
+	}
 
-	fputs("# Index\tHave\tTotal\tPercent\tName\n", s);
+	rpc->handler = (RPCHandler)handle_fetch_files;
+	FetchFilesArg *arg = malloc(sizeof *arg);
+	if (!arg)
+		abort();
+
+	arg->s = s;
+	arg->num_has_tell_status = s->count;
+
+	rpc->arg = arg;
+
+	begin_rpc_multicall();
+
+	for (size_t i = 0; i < arg->num_has_tell_status;) {
+		Download *d = s->downloads[i];
+		if (d->num_files) {
+			/* Order downloads without files at first to avoid an
+			 * allocation. */
+			Download **p = &s->downloads[--arg->num_has_tell_status];
+			Download *t = *p;
+			*p = d;
+			s->downloads[i] = t;
+			continue;
+		}
+
+		begin_rpc_multicall_method("aria2.tellStatus", d);
+		/* "keys" */
+		json_write_beginarr(jw);
+		json_write_str(jw, "files");
+		json_write_endarr(jw);
+		end_rpc_multicall_method();
+
+		++i;
+	}
+
+	end_rpc_multicall();
+
+	do_rpc(rpc);
+}
+
+static void
+select_files(Selection *s, bool all)
+{
+	RPCRequest *rpc;
+	if (!(rpc = new_rpc())) {
+		free_selection(s);
+		return;
+	}
+
+	FILE *stream;
+	if (!(stream = open_output())) {
+		free_rpc(rpc);
+		free_selection(s);
+		return;
+	}
+
+	if (!s)
+		s = get_selection(all);
+
+	fputs("# ID\tHave\tTotal\tPercent\tPath\n", stream);
 	for (int state = 1;;) {
-		fprintf(s, "# %s files (%"PRIu32"/%"PRIu32")\n",
-				state ? "Selected" : "Unselected",
-				state ? d->num_selfiles : d->num_files - d->num_selfiles,
-				d->num_files);
+		fprintf(stream, "# %s files", state ? "Selected" : "Unselected");
+		if (1 == s->count) {
+			Download const *d = s->downloads[0];
+			fprintf(stream, " (%"PRIu32"/%"PRIu32")",
+					state ? d->num_files_selected : d->num_files - d->num_files_selected,
+					d->num_files);
+		}
+		fputc('\n', stream);
 
-		for (uint32_t i = 0; i < d->num_files; ++i) {
-			File const *f = &d->files[i];
-			if (f->selected == state) {
+		for (size_t i = 0; i < s->count; ++i) {
+			Download const *d = s->downloads[i];
+			if (!d->num_files) {
+				fclose(stream);
+				free_rpc(rpc);
+				fetch_files(s);
+				return;
+			}
+
+			for (uint32_t j = 0; j < d->num_files; ++j) {
+				File const *f = &d->files[j];
+				if (f->selected != state)
+					continue;
+
 				char const *name = get_file_display_name(d, f);
 				char szhave[6];
 				char sztotal[6];
@@ -4007,134 +4107,234 @@ select_files(Download *d)
 				sztotal[fmt_space(sztotal, f->total)] = '\0';
 				szpercent[fmt_percent(szpercent, f->have, f->total)] = '\0';
 
-				fprintf(s, "%"PRIu32"\t%s\t%s\t%s\t%s\n",
-						i + 1,
+				if (1 < s->count)
+					fprintf(stream, "%s_", d->gid);
+				fprintf(stream, "%"PRIu32"\t%s\t%s\t%s\t%s\n",
+						j + 1,
 						szhave, sztotal, szpercent,
 						name);
 			}
 		}
+
 		if (--state < 0)
 			break;
-		fputc('\n', s);
+		fputc('\n', stream);
 	}
 
-	fprintf(s,
+	fprintf(stream,
 			"\n"
-			"# Select files of download %s\n"
+			"# Select files of %s%s\n"
 			"#\n"
 			"# To unselect a file remove that line.\n"
 			"#\n"
-			"# Lines can be re-ordered and edited unless their index is present.\n"
+			"# Lines can be re-ordered and edited unless their ID is present.\n"
 			"#\n"
 			"# Lines starting with # are ignored.\n"
 			"#\n"
 			"# If you do not remove unselected files, they will be selected.\n"
 			"#\n",
-			d->display_name);
+			1 == s->count ? "download " : "several downloads",
+			1 == s->count ? s->downloads[0]->display_name : "");
 
-	fclose(s);
+	fclose(stream);
 
 	int status;
-	if ((status = run_action(d, "f")) < 0)
+	if ((status = run_action(1 == s->count ? s->downloads[0] : NULL, "f")) < 0)
 		status = fileout(true);
 
-	if (EXIT_SUCCESS != status)
+	if (status) {
+		free_rpc(rpc);
 		return;
+	}
 
-	if (!(s = fopen(session_file, "r")))
+	if (!(stream = open_input())) {
+		free_rpc(rpc);
 		return;
+	}
 
-	for (uint32_t i = 0; i < d->num_files; ++i)
-		d->files[i].selected = false;
-	d->num_selfiles = 0;
+	for (size_t i = 0; i < s->count; ++i) {
+		Download *d = s->downloads[i];
+		for (uint32_t j = 0; j < d->num_files; ++j)
+			d->files[j].selected = false;
+		d->num_files_selected = 0;
+	}
 
 	char *line = NULL;
 	size_t line_size = 0;
 	ssize_t line_len;
 
-	while (0 <= (line_len = getline(&line, &line_size, s))) {
-		if (line_len <= 0 || '#' == line[0])
+	while (0 <= (line_len = getline(&line, &line_size, stream))) {
+		if ('#' == line[0])
 			continue;
 
-		uint32_t file_idx;
-		if (1 != sscanf(line, "%"SCNu32, &file_idx))
-			continue;
-		--file_idx;
-
-		if (d->num_files <= file_idx)
-			continue;
-
-		d->files[file_idx].selected = true;
-		++d->num_selfiles;
-	}
-
-	fclose(s);
-	free(line);
-
-	char *value = NULL;
-	int value_len = 0;
-	int value_size = 0;
-
-	for (;;) {
-		for (uint32_t i = 0; i < d->num_files; ++i) {
-			if (!d->files[i].selected)
+		uint32_t file_index;
+		Download *d;
+		if (1 < s->count) {
+			char const *p;
+			d = find_download_by_gid(line, &p);
+			if (!d)
 				continue;
 
-			uint32_t from = i;
-			uint32_t to = i;
+			int n = sscanf(p, "_%"SCNu32, &file_index);
+			if (n <= 0)
+				continue;
+		} else {
+			d = s->downloads[0];
+			if (1 != sscanf(line, "%"SCNu32, &file_index))
+				continue;
+		}
+		--file_index;
 
-			for (; to + 1 < d->num_files && d->files[to + 1].selected; ++to);
+		if (d->num_files <= file_index)
+			continue;
 
-			value_len += snprintf(value + value_len, value ? value_size : 0,
-					from == to
-						? ",%"PRIu32
-						: ",%"PRIu32"-%"PRIu32,
-					from + 1, to + 1);
+		d->files[file_index].selected = true;
+		++d->num_files_selected;
+	}
 
-			i = to;
+	free(line);
+	fclose(stream);
+
+	rpc->handler = (RPCHandler)handle_option_change;
+	rpc->arg = s;
+
+	begin_rpc_multicall();
+
+	for (size_t i = 0; i < s->count; ++i) {
+		Download *d = s->downloads[i];
+
+		char *value = NULL;
+		int value_len = 0;
+		int value_size = 0;
+
+		for (;;) {
+			for (uint32_t i = 0; i < d->num_files; ++i) {
+				if (!d->files[i].selected)
+					continue;
+
+				uint32_t from = i;
+				uint32_t to = i;
+
+				for (; to + 1 < d->num_files && d->files[to + 1].selected; ++to);
+
+				value_len += snprintf(value + value_len, value ? value_size : 0,
+						from == to
+							? ",%"PRIu32
+							: ",%"PRIu32"-%"PRIu32,
+						from + 1, to + 1);
+
+				i = to;
+			}
+
+			if (value || !value_len)
+				break;
+
+			value_size = value_len + 1 /* NUL */;
+			value_len = 0;
+
+			if (!(value = malloc(value_size)))
+				abort();
 		}
 
-		if (value)
-			break;
+		begin_rpc_multicall_method("aria2.changeOption", d);
 
-		value_size = value_len + 1 /* NUL */;
-		value_len = 0;
+		/* "options" */
+		json_write_beginobj(jw);
+		json_write_key(jw, "select-file");
+		json_write_str(jw, value ? value + 1 : "");
+		json_write_endobj(jw);
 
-		if (!(value = malloc(value_size)))
-			return;
-	}
+		end_rpc_multicall_method();
 
-	RPCRequest *rpc;
-
-	if (!(rpc = new_rpc())) {
 		free(value);
-		return;
 	}
 
-	rpc->handler = (RPCHandler)change_option_handler;
-	rpc->arg = ref_download(d);
-
-	json_write_key(jw, "method");
-	json_write_str(jw, "aria2.changeOption");
-
-	json_write_key(jw, "params");
-	json_write_beginarr(jw);
-
-	/* “secret” */
-	json_write_str(jw, secret_token);
-	/* “gid” */
-	json_write_str(jw, d->gid);
-	/* “options” */
-	json_write_beginobj(jw);
-	json_write_key(jw, "select-file");
-	json_write_str(jw, value + (value && ',' == value[0]));
-	json_write_endobj(jw);
-
-	json_write_endarr(jw);
+	end_rpc_multicall();
 
 	do_rpc(rpc);
+}
 
-	free(value);
+static int
+plumb_downloads(char cmd)
+{
+	FILE *stream;
+	if (!(stream = open_output()))
+		return EXIT_FAILURE;
+
+	for (size_t i = 0; i < num_downloads; ++i) {
+		Download *d = downloads[i];
+		print_download(d, stream);
+		if (D_ERROR == abs(d->status))
+			fprintf(stream, "# %s\n", d->error_msg);
+	}
+
+	fclose(stream);
+
+	int status;
+	if ((status = run_action(NULL, "%c", cmd)) < 0)
+		status = fileout(true);
+
+	return status;
+}
+
+static void
+select_downloads(char cmd)
+{
+	int status = plumb_downloads(cmd);
+	if (status)
+		return;
+
+	FILE *stream;
+	if (!(stream = open_input()))
+		return;
+
+	for (size_t i = 0; i < num_downloads; ++i)
+		downloads[i]->deleted = true;
+
+	char *line = NULL;
+	size_t line_size = 0;
+	ssize_t line_len;
+
+	while (0 <= (line_len = getline(&line, &line_size, stream))) {
+		Download *d = find_download_by_gid(line, NULL);
+		if (!d)
+			continue;
+
+		d->deleted = false;
+	}
+
+	free(line);
+	fclose(stream);
+
+	for (size_t i = num_downloads; 0 < i;) {
+		Download **dd = &downloads[--i], *d = *dd;
+		if (d->deleted) {
+			d->deleted = false;
+			delete_download_at(dd);
+		}
+	}
+
+	num_selects = SIZE_MAX;
+
+	on_downloads_change(true);
+	refresh();
+}
+
+static void
+shutdown_aria(void)
+{
+	if (0 < run_action(NULL, "Q"))
+		return;
+
+	RPCRequest *rpc;
+	if (!(rpc = new_rpc()))
+		return;
+
+	rpc->handler = (RPCHandler)handle_shutdown;
+
+	generate_rpc_method(do_forced ? "aria2.forceShutdown" : "aria2.shutdown");
+
+	do_rpc(rpc);
 }
 
 static void
@@ -4148,7 +4348,7 @@ read_stdin(void)
 		/*MAN(KEYS)
 		 * .TP
 		 * .BR j ,\  Down
-		 * Move selection downwards.
+		 * Go downwards.
 		 */
 		case 'j':
 		case KEY_DOWN:
@@ -4163,7 +4363,7 @@ read_stdin(void)
 		/*MAN(KEYS)
 		 * .TP
 		 * .BR k ,\  Up
-		 * Move selection upwards.
+		 * Go upwards.
 		 */
 		case 'k':
 		case KEY_UP:
@@ -4175,7 +4375,7 @@ read_stdin(void)
 		/*MAN(KEYS)
 		 * .TP
 		 * .BR h
-		 * Select parent.
+		 * Go to parent download.
 		 */
 		case 'h':
 			if (0 < num_downloads)
@@ -4185,7 +4385,7 @@ read_stdin(void)
 		/*MAN(KEYS)
 		 * .TP
 		 * .BR l
-		 * Select first children.
+		 * Go to first children.
 		 */
 		case 'l':
 			if (0 < num_downloads)
@@ -4195,7 +4395,7 @@ read_stdin(void)
 		/*MAN(KEYS)
 		 * .TP
 		 * .BR n
-		 * Select next sibling.
+		 * Go to next sibling.
 		 */
 		case 'n':
 			if (0 < num_downloads)
@@ -4205,7 +4405,7 @@ read_stdin(void)
 		/*MAN(KEYS)
 		 * .TP
 		 * .BR N
-		 * Select previous sibling.
+		 * Go to previous sibling.
 		 */
 		case 'N':
 			if (0 < num_downloads)
@@ -4215,7 +4415,7 @@ read_stdin(void)
 		/*MAN(KEYS)
 		 * .TP
 		 * .BR g ,\  Home
-		 * Select first.
+		 * Go to first.
 		 */
 		case 'g':
 		case KEY_HOME:
@@ -4227,7 +4427,7 @@ read_stdin(void)
 		/*MAN(KEYS)
 		 * .TP
 		 * .BR G ,\  End
-		 * Select last.
+		 * Go to last.
 		 */
 		case 'G':
 		case KEY_END:
@@ -4313,7 +4513,7 @@ read_stdin(void)
 		 * .B Ctrl-O
 		 * Jump to old position.
 		 * .IP
-		 * Old position is the place where download was before sorting.
+		 * Old position is the place where download was before re-sorting.
 		 */
 		case CONTROL('O'):
 		{
@@ -4328,7 +4528,7 @@ read_stdin(void)
 		/*MAN(KEYS)
 		 * .TP
 		 * .BR [
-		 * Select first download of the previous status group.
+		 * Go to first download of the previous status group.
 		 */
 		case '[':
 			jump_prev_group();
@@ -4337,7 +4537,7 @@ read_stdin(void)
 		/*MAN(KEYS)
 		 * .TP
 		 * .BR ]
-		 * Select first download of the next status group.
+		 * Go to first download of the next status group.
 		 */
 		case ']':
 			jump_next_group();
@@ -4345,43 +4545,7 @@ read_stdin(void)
 
 		/*MAN(KEYS)
 		 * .TP
-		 * .B J
-		 * Move selected download forward in the queue.
-		 */
-		case 'J':
-		/*MAN(KEYS)
-		 * .TP
-		 * .B K
-		 * Move selected download backward in the queue.
-		 */
-		case 'K':
-			if (0 < num_downloads)
-				change_position(downloads[selidx], 'J' == ch ? -1 : 1, SEEK_CUR);
-			break;
-
-		/*MAN(KEYS)
-		 * .TP
-		 * .BR s ,\  S
-		 * Start (unpause) selected/all download(s).
-		 * .TP
-		 * .BR p ,\  P
-		 * Pause selected/all download(s).
-		 */
-		case 's':
-		case 'p':
-			if (0 < num_downloads)
-				pause_download(downloads[selidx], ch == 'p', do_forced);
-			do_forced = 0;
-			break;
-		case 'S':
-		case 'P':
-			pause_download(NULL, ch == 'P', do_forced);
-			do_forced = 0;
-			break;
-
-		/*MAN(KEYS)
-		 * .TP
-		 * .BR v ,\  RIGHT
+		 * .BR v ,\  Right
 		 * Switch to next view.
 		 */
 		case 'v':
@@ -4391,7 +4555,7 @@ read_stdin(void)
 
 		/*MAN(KEYS)
 		 * .TP
-		 * .BR V ,\  LEFT
+		 * .BR V ,\  Left
 		 * Switch to previous view.
 		 */
 		case 'V':
@@ -4401,21 +4565,38 @@ read_stdin(void)
 
 		/*MAN(KEYS)
 		 * .TP
+		 * .B J
+		 * Move download forward in the queue.
+		 */
+		case 'J':
+		/*MAN(KEYS)
+		 * .TP
+		 * .B K
+		 * Move download backward in the queue.
+		 */
+		case 'K':
+			if (0 < num_downloads)
+				change_position(downloads[selidx], 'J' == ch ? -1 : 1, SEEK_CUR);
+			break;
+
+		/*MAN(KEYS)
+		 * .TP
 		 * .BR a ,\  A ,\  +
-		 * Add download(s) from
+		 * Add downloads from
 		 * .IR "session file" .
 		 * Open
 		 * .I session file
-		 * for editing unless there are associated actions. Select lastly added download.
+		 * for editing unless there are associated actions.
 		 * .IP
 		 * For the expected format refer to aria2's
 		 * .IR "Input File" .
+		 * .IP
+		 * Added downloads are queued after the currently selected download.
+		 * .IP
 		 * Note that URIs that end with
 		 * .BR .torrent \ and\  .meta4 \ or\  .metalink
-		 * and refer to a readable file on the local filesystem, are got uploaded to
-		 * aria2 as a blob.
-		 * .IP
-		 * Insert downloads after the selection in the queue.
+		 * and refer to a readable file on the local filesystem are uploaded to
+		 * aria2 as a BLOB.
 		 */
 		case 'a':
 		case 'A':
@@ -4423,31 +4604,86 @@ read_stdin(void)
 			add_downloads(ch);
 			break;
 
+
 		/*MAN(KEYS)
 		 * .TP
-		 * .BR i ,\  I
-		 * Write selected download/global options in a
-		 * .BR = -separated
-		 * key-value format into the
-		 * .IR "session file" .
-		 * Open
-		 * .I session file
-		 * for viewing unless there are associated actions.
-		 * Edit the file to change options.
+		 * .BR s ,\  S
+		 * Start (unpause) downloads.
+		 * .TP
+		 * .BR p ,\  P
+		 * Pause downloads.
 		 */
-		case 'i':
-		case 'I':
-			show_options(0 < num_downloads && ch == 'i' ? downloads[selidx] : NULL);
+		case 's':
+		case 'p':
+		case 'S':
+		case 'P':
+			pause_download('S' == ch || 'P' == ch, 'p' == ch || 'P' == ch);
 			break;
 
 		/*MAN(KEYS)
 		 * .TP
-		 * .BR f
+		 * .BR f ,\  F
 		 * Interactively select files.
 		 */
 		case 'f':
-			if (0 < num_downloads)
-				select_files(downloads[selidx]);
+		case 'F':
+			select_files(NULL, 'F' == ch);
+			break;
+
+		/*MAN(KEYS)
+		 * .TP
+		 * .BR i ,\  I
+		 * Write selected download/global options in a
+		 * name=value format into the
+		 * .IR "session file" .
+		 * After that, open
+		 * .I session file
+		 * for viewing unless there are associated actions. To change
+		 * options, edit the file.
+		 * .IP
+		 * Be extra careful not to accidentally overwriting global
+		 * options (which contained among returned options), so make
+		 * sure final file contains only options you really want to be
+		 * modified. Note that you can always edit aria2's
+		 * .I Input file
+		 * to correct unwanted edits.
+		 */
+		case 'i':
+		case 'I':
+			show_options('I' == ch);
+			break;
+
+		/*MAN(KEYS)
+		 * .TP
+		 * .BR = ,\ / ,\ ?
+		 * Select downloads.
+		 * .IP
+		 * When only a subset of all downloads are displayed an
+		 * .BR = -sign
+		 * is shown at the status bar.
+		 * .IP
+		 * When selection is active it slightly modifies upper case
+		 * commands that would operate on global resources (like
+		 * .BR I )
+		 * so that they will take action an all selected downloads.
+		 * .IP
+		 * To clear selection use
+		 * .BR q .
+		 */
+		case '=':
+		case '/':
+		case '?':
+			select_downloads(ch);
+			break;
+
+		/*MAN(KEYS)
+		 * .TP
+		 * .BR x ,\  X
+		 * Remove download result for download.
+		 */
+		case 'x':
+		case 'X':
+			purge_download('X' == ch);
 			break;
 
 		/*MAN(KEYS)
@@ -4458,56 +4694,30 @@ read_stdin(void)
 		 */
 		case 'D':
 		case KEY_DC: /* Delete. */
-			if (0 < num_downloads) {
-				remove_download(downloads[selidx], do_forced);
-				do_forced = 0;
-			}
+			remove_download();
 			break;
-
-		/*MAN(KEYS)
-		 * .TP
-		 * .BR x ,\  X
-		 * Remove download result for selection/all downloads.
-		 */
-		case 'x':
-			if (0 < num_downloads)
-				purge_download(downloads[selidx]);
-			break;
-		case 'X':
-			purge_download(NULL);
-			break;
-
-		/*MAN(KEYS)
-		 * .TP
-		 * .BR q ,\  Esc
-		 * Go back to default view. On default view quit.
-		 */
-		case 'q':
-		case CONTROL('['):
-			if (view != VIEWS[1]) {
-				view = VIEWS[1];
-				tui.selidx = -1; /* force redraw */
-				draw_all();
-				refresh();
-				continue;
-			}
-			/* fallthrough */
-		/*MAN(KEYS)
-		 * .TP
-		 * .B Z
-		 * Quit program.
-		 */
-		case 'Z':
-			exit(EXIT_SUCCESS);
 
 		/*MAN(KEYS)
 		 * .TP
 		 * .B !
-		 * Do next command by force. With Torrent downloads, for
-		 * example, it means that it will not contact to tracker(s).
+		 * Do next command by force.
+		 * .IP
+		 * For example, pausing a Torrent download by force
+		 * .RB ( !p )
+		 * means that
+		 * aria2 will not contact to trackers.
 		 */
 		case '!':
-			do_forced = 1;
+			do_forced = true;
+			continue;
+
+		/*MAN(KEYS)
+		 * .TP
+		 * .BR |
+		 * Emit GIDs of selected downloads.
+		 */
+		case '|':
+			plumb_downloads('|');
 			break;
 
 		/*MAN(KEYS)
@@ -4530,23 +4740,54 @@ read_stdin(void)
 
 		/*MAN(KEYS)
 		 * .TP
+		 * .BR q ,\  Esc
+		 * Return to default view OR clear selection OR quit program.
+		 */
+		case 'q':
+		case CONTROL('['):
+			if (view != VIEWS[1]) {
+				view = VIEWS[1];
+				tui.selidx = -1; /* Force redraw. */
+				draw_all();
+				refresh();
+				break;
+			}
+
+			if (num_selects) {
+				num_selects = 0;
+				update_all();
+				break;
+			}
+
+			/* FALLTHROUGH */
+
+		/*MAN(KEYS)
+		 * .TP
+		 * .B Z
+		 * Quit program.
+		 */
+		case 'Z':
+			exit(EXIT_SUCCESS);
+
+		/*MAN(KEYS)
+		 * .TP
 		 * .B Q
-		 * Run mode \*(lqQ\*(rq then shut down aria2 if mode terminated with success.
+		 * Shut down aria2, if action \*(lqQ\*(rq does not exist or
+		 * terminated with success.
 		 */
 		case 'Q':
-			if (EXIT_FAILURE != run_action(NULL, "Q"))
-				shutdown_aria(do_forced);
-			do_forced = 0;
+			shutdown_aria();
 			break;
 
 		/* Undocumented. */
 		case CONTROL('L'):
-			/* try connect if not connected */
+			num_selects = 0;
+
+			/* Try connect if not connected. */
 			if (!ws_is_alive())
 				try_connect();
-			mode.type = MODE_VISUAL;
-			mode.num_sel = 0;
-			update_all();
+			else
+				update_all();
 			break;
 
 		/*MAN(KEYS)
@@ -4564,7 +4805,7 @@ read_stdin(void)
 			/*MAN(KEYS)
 			 * .TP
 			 * .B MouseScroll
-			 * Move selection.
+			 * Move cursor.
 			 */
 #ifdef BUTTON5_PRESSED
 			if (event.bstate & BUTTON4_PRESSED)
@@ -4576,7 +4817,7 @@ read_stdin(void)
 			/*MAN(KEYS)
 			 * .TP
 			 * .B MouseDown
-			 * Select.
+			 * Move cursor.
 			 */
 			if (((BUTTON1_PRESSED | BUTTON3_PRESSED) & event.bstate) &&
 			    VIEWS[1] == view &&
@@ -4590,17 +4831,17 @@ read_stdin(void)
 		/*MAN(KEYS)
 		 * .TP
 		 * .R (other)
-		 * Run mode named like the pressed key. Uses
-		 * .BR keyname (3x).
+		 * Run action named like the pressed key. Uses
+		 * .BR keyname (3x)
+		 * for translating pressed key to a name.
 		 */
 		default:
 		default_action:
 			run_action(NULL, "%s", keyname(ch));
-			do_forced = 0;
 			break;
-
 		}
 
+		do_forced = false;
 	}
 }
 
@@ -4653,7 +4894,7 @@ cleanup_session_file(void)
 }
 
 static void
-remote_info_handler(JSONNode const *result, void *arg)
+handle_remote_info(JSONNode const *result, void *arg)
 {
 	JSONNode const *node;
 
@@ -4668,65 +4909,27 @@ remote_info_handler(JSONNode const *result, void *arg)
 
 	result = json_next(result);
 	node = json_children(result);
-	parse_options(node, (parse_options_cb)parse_option, NULL);
+	parse_options(node, NULL);
 
 	/* we have is_local correctly set, so we can start requesting downloads */
-
-	switch (mode.type) {
-	case MODE_ADD_DOWNLOADS:
-		add_downloads('\0');
-		break;
-
-	case MODE_SHUTDOWN:
-		shutdown_aria(do_forced);
-		break;
-
-	default:
-		update_all();
-		break;
-	}
+	update_all();
 }
 
 static void
 remote_info(void)
 {
 	RPCRequest *rpc;
-
 	if (!(rpc = new_rpc()))
 		return;
 
-	rpc->handler = remote_info_handler;
+	rpc->handler = handle_remote_info;
 
-	json_write_key(jw, "method");
-	json_write_str(jw, "system.multicall");
+	begin_rpc_multicall();
 
-	json_write_key(jw, "params");
-	json_write_beginarr(jw);
-	/* 1st arg: “methods” */
-	json_write_beginarr(jw); /* {{{ */
+	generate_rpc_multicall_method("aria2.getSessionInfo", NULL);
+	generate_rpc_multicall_method("aria2.getGlobalOption", NULL);
 
-	json_write_beginobj(jw);
-	json_write_key(jw, "methodName");
-	json_write_str(jw, "aria2.getSessionInfo");
-	json_write_key(jw, "params");
-	json_write_beginarr(jw);
-	/* “secret” */
-	json_write_str(jw, secret_token);
-	json_write_endarr(jw);
-	json_write_endobj(jw);
-
-	json_write_beginobj(jw);
-	json_write_key(jw, "methodName");
-	json_write_str(jw, "aria2.getGlobalOption");
-	json_write_key(jw, "params");
-	json_write_beginarr(jw);
-	/* “secret” */
-	json_write_str(jw, secret_token);
-	json_write_endarr(jw);
-	json_write_endobj(jw);
-
-	json_write_endarr(jw);
-	json_write_endarr(jw);
+	end_rpc_multicall();
 
 	do_rpc(rpc);
 }
@@ -4739,7 +4942,7 @@ on_ws_open(void)
 
 	periodic = NULL;
 
-	clear_error_msg();
+	clear_error();
 
 	tui.selidx = -1;
 	tui.topidx = -1;
@@ -4758,9 +4961,6 @@ on_ws_close(void)
 
 	if (!errno)
 		exit(EXIT_SUCCESS);
-
-	if (MODE_VISUAL != mode.type)
-		exit(EXIT_FAILURE);
 
 	if (try_connect != periodic) {
 		periodic = try_connect;
@@ -4784,9 +4984,9 @@ on_ws_close(void)
 static void
 init_action(void)
 {
-	for (size_t i = 0; i < mode.num_sel; ++i) {
-		if (!is_gid(mode.sel[i])) {
-			mode.use_files = true;
+	for (size_t i = 0; i < num_selects; ++i) {
+		if (!is_gid(selects[i])) {
+			select_need_files = true;
 			break;
 		}
 	}
@@ -4833,7 +5033,6 @@ setup_sighandlers(void)
 	sigaddset(&ss, SIGINT);
 	sigaddset(&ss, SIGHUP);
 	sigaddset(&ss, SIGTERM);
-	sigaddset(&ss, SIGKILL);
 	sigaddset(&ss, SIGQUIT);
 	sigaddset(&ss, SIGPIPE);
 
@@ -4870,29 +5069,23 @@ main(int argc, char *argv[])
 			if (argc <= argi)
 				goto show_usage;
 
-			mode.num_sel = 1;
-			mode.sel = &argv[argi];
+			num_selects = 1;
+			selects = (char const **)&argv[argi];
 			while (++argi, argv[argi] && '-' != *argv[argi])
-				++mode.num_sel;
-		} else if (!strcmp(arg, "--print-gid")) {
-			mode.type = MODE_PRINT_GID;
-		} else if (!strcmp(arg, "--add")) {
-			mode.type = MODE_ADD_DOWNLOADS;
-		} else if (!strcmp(arg, "--shutdown")) {
-			mode.type = MODE_SHUTDOWN;
-		} else if (!strcmp(arg, "--pause")) {
-			mode.type = MODE_PAUSE;
-		} else if (!strcmp(arg, "--unpause")) {
-			mode.type = MODE_UNPAUSE;
-		} else if (!strcmp(arg, "--purge")) {
-			mode.type = MODE_PURGE;
-		} else if (!strcmp(arg, "--force")) {
-			do_forced = 1;
+				++num_selects;
+		} else if (!strcmp(arg, "--version")) {
+			fprintf(stderr, "aria2t "VERSION"\n");
+			return EXIT_SUCCESS;
 		} else {
 		show_usage:
 			return EXIT_FAILURE;
 		}
 	}
+
+#if 0
+	if (isatty(STDOUT_FILENO))
+		freopen("/dev/null", "w", stderr);
+#endif
 
 	init_config();
 
@@ -4903,39 +5096,35 @@ main(int argc, char *argv[])
 	/* atexit(clear_downloads); */
 	atexit(cleanup_session_file);
 
-	if (MODE_VISUAL == mode.type) {
-		pfds[0].fd = STDIN_FILENO;
-		pfds[0].events = POLLIN;
+	pfds[0].fd = STDIN_FILENO;
+	pfds[0].events = POLLIN;
 
-		atexit(_endwin);
-		newterm(NULL, stderr, stdin);
-		start_color();
-		use_default_colors();
-		fill_pairs();
-		/* No input buffering. */
-		raw();
-		/* No input echo. */
-		noecho();
-		/* Do not translate '\n's. */
-		nonl();
-		/* Make getch() non-blocking. */
-		nodelay(stdscr, TRUE);
-		/* Catch special keys. */
-		keypad(stdscr, TRUE);
-		/* 8-bit inputs. */
-		meta(stdscr, TRUE);
-		/* Listen for all mouse events. */
-		mousemask(ALL_MOUSE_EVENTS, NULL);
-		/* Be immediate. */
-		mouseinterval(0);
+	atexit(_endwin);
+	newterm(NULL, stderr, stdin);
+	start_color();
+	use_default_colors();
+	fill_pairs();
+	/* No input buffering. */
+	raw();
+	/* No input echo. */
+	noecho();
+	/* Do not translate '\n's. */
+	nonl();
+	/* Make getch() non-blocking. */
+	nodelay(stdscr, TRUE);
+	/* Catch special keys. */
+	keypad(stdscr, TRUE);
+	/* 8-bit inputs. */
+	meta(stdscr, TRUE);
+	/* Listen for all mouse events. */
+	mousemask(ALL_MOUSE_EVENTS, NULL);
+	/* Be immediate. */
+	mouseinterval(0);
 
-		update_terminfo();
+	update_terminfo();
 
-		draw_all();
-		refresh();
-	} else {
-		pfds[0].fd = -1;
-	}
+	draw_all();
+	refresh();
 
 	try_connect();
 

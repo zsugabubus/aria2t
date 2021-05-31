@@ -4,20 +4,8 @@ aria2t \- an aria2c terminal frontend
 
 .SH SYNOPSIS
 .B aria2t
-.RB [\  --force \ ]
-\\
-.RS
-.RB [\  \-\-add \ |
-.br
-.RB \ \  \-\-shutdown \ |
-.br
-.RB \ \ {\ [\  \-\-select
+.RB [\  \-\-select
 .RI {\  PATH \ |\  GID \ }...\ ]
-.R [
-.BR \-\-print\-gid \ |
-.BR \-\-pause \ |
-.BR \-\-unpause \ |
-.BR \-\-purge \ ]\ }\ ]
 .RE
 .
 .SH DESCRIPTION
@@ -25,50 +13,24 @@ aria2t \- an aria2c terminal frontend
 is a low footprint terminal frontend for
 .BR aria2c (1).
 .
-.sp
-Program invocation reads as follows: do action on selected download(s). If no
-action provided, program runs in visual mode. This is the default, main behavior.
-.
-.sp
-Even though
-.B aria2t
-provides such very basic scripting abilities, it is advised to use the RPC
-interface directly.
-.
 .SH OPTIONS
 .TP
-.B \-\-force
-Refer to
-.BR ! " key."
-.TP
-.B \-\-add
-Add URIs from standard input. Same as
-.BR a ,\  A \ and\  + ,
-except it does not invoke any actions.
-.
-.TP
-.B \-\-shutdown
-Same as
-.BR q ,
-except it does not invoke any actions.
-.
-.TP
 \fB\-\-select\fR { \fIPATH\fR | \fIGID\fR }...
-Select downloads by their \fIGID\fR or by matching \fIPATH\fR prefix. If omitted, every download is selected.
-.
-.TP
-.B \-\-print\-*, --pause, --unpause, --purge
-Take these self-describing actions on
-.BR \-\-select ed
-downloads.
+Select downloads by their \fIGID\fR or by matching \fIPATH\fR prefix. If
+omitted, every download is selected. Refer to
+.BR = .
 .
 .SH TERMINOLOGY
 .SS Session file
-A temporary file that used for exchanging data between aria2t and user (actions).
+A temporary file that used for exchanging data between
+.BR aria2t (1)
+and user.
 .
 .SS Actions
 Actions are executable programs, used for customizing the behavior of
-.IR aria2t .
+.BR aria2t (1)
+by automatically generating contents of
+.IR "session file" .
 .sp
 They always receive the following arguments:
 .
@@ -78,32 +40,52 @@ Selection GID (or empty if there are none).
 Path to the
 .IR "session file" .
 .PP
-If an action terminates with failure, in-progress operation is cancelled. When
-an actions does not exist, either a default, builtin action is executed or it
-is treated like it was terminated with success.
+If an action terminates with failure, then in-progress operation is cancelled. When
+an actions does not exist, a default action is executed that always involves opening
+.IR "session file"
+in the pager or the editor.
 .
 .SH USAGE
 .SS "Keyboard Control"
+As a rule of thumb, lower case commands operate on cursor line and upper case
+commands operate on global resources OR all downloads. Latter is depending on
+whether selection is active or not. Refer to
+.BR = .
+.
 INCLUDE(KEYS)
 .
 .SS Views
 The following views are available (in this order):
 .IP \(bu
 .BR Downloads \ (default).
-Shows downloads in an auto-ordered list: Topmost the queued
+Show downloads in an auto-ordered list: Topmost the queued
 and currently active ones; completed downloads and errors at the bottom;
 everything else is in-between.
 .IP \(bu
 .BR Files.
-Shows download state and path for files of a download, URIs of files and servers used for downloading a
+Show download state and path of files of a download, URIs of files and servers used for downloading a
 URI. Starred (\*(lq*\*(rq) URIs are the ones that were used for downloading. Dashed (\*(lq----\*(rq)
 progress means an unselected file.
+.IP
+Note that the list currently is not scrollable and otherwise numb to user
+actions (for example modifying URI list and such is not possible). To select
+specific files or to simply get a scrollable overview refer to
+.BR f ,\  F .
 .IP \(bu
 .BR Peers.
-Shows connected BitTorrent peers\(aq IP address, port number, (their) progress
-and download speed, speed information about how fast aria2 downloads and uploads
-from/to them (dashes means choking).
+Show connected BitTorrent peers\(aq IP address, port number, (their) progress
+and download speed, speed information about how fast our aria2 downloads and
+uploads from/to them. Dashes mean choking.
 .PP
+.
+.SS Tagging
+When
+.BR aria2t (1)
+can access the downloaded files, it provides basic tagging mechanism that means
+it reads
+.RB $ ARIA2T_TAGS_XATTR
+extended attribute of downloaded files and directories and displays it in a new
+column.
 .
 .SH ENVIRONMENT
 .TP

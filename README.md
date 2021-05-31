@@ -6,7 +6,7 @@ minimal but complete.
 ## Features
 
 * **Multiple views.** Downloads, files, peers.
-* **Efficient.** Requests and updates only what needed.
+* **Efficient.** Request and update only what needed.
 * **Scriptable.** Bind an executable to any key.
 * **Batteries included.** Most RPC commands covered.
 
@@ -14,12 +14,12 @@ minimal but complete.
 
 ### Dependencies
 
-* `cc -std=c11`
-* `coreutils`
-* `gperf`
-* `make`
+* `cc -std=c11` (Build only.)
+* `coreutils` (Build only.)
+* `gperf` (Build only.)
+* `make` (Build only.)
+* `sed` (Build only.)
 * `ncursesw`
-* `sed`
 
 ### Build from source
 

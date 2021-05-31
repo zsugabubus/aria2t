@@ -19,6 +19,8 @@ LDLIBS += -lncursesw
 # LDLIBS  += $(shell $(PKGCONFIG) --libs $(PACKAGES))
 LDFLAGS += $(shell $(PKGCONFIG) --cflags $(PACKAGES))
 
+VERSION := $(shell git describe --always --tags --dirty --match 'v*')
+
 all : $(TARGET)
 
 keys.in : keys.gen $(TARGET).c
@@ -27,6 +29,9 @@ keys.in : keys.gen $(TARGET).c
 $(TARGET).1 : % : manpage.gen %.in $(TARGET).c
 	./$+
 
+run : $(TARGET)
+	gdb $(TARGET) -ex run
+
 jeezson/% :
 	git submodule update --init jeezson
 
@@ -34,7 +39,7 @@ fourmat/% :
 	git submodule update --init fourmat
 
 $(TARGET) : %: keys.in %.c program.? websocket.? b64.? jeezson/jeezson.? fourmat/fourmat.? Makefile
-	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $(LDLIBS) $@.c program.c websocket.c b64.c jeezson/jeezson.c fourmat/fourmat.c
+	$(CC) -o $@ -DVERSION=\"$(VERSION)\" $(CFLAGS) $(LDFLAGS) $(LDLIBS) $@.c program.c websocket.c b64.c jeezson/jeezson.c fourmat/fourmat.c
 
 installdirs :
 	$(INSTALL) -d $(DESTDIR)$(bindir) \
@@ -58,4 +63,4 @@ clean :
 	$(MAKE) -C jeezson clean
 	$(MAKE) -C fourmat clean
 
-.PHONY: all clean dist docs install install-strip installdirs uninstall
+.PHONY: all clean dist docs install install-strip installdirs uninstall run

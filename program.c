@@ -7,21 +7,27 @@ char *error_msg;
 void
 show_error(char const *format, ...)
 {
-	va_list argptr;
-	int size;
-
 	free(error_msg);
 	error_msg = NULL;
 
-	if (format) {
-		va_start(argptr, format);
-		size = vsnprintf(NULL, 0, format, argptr) + 1 /* NUL */;
-		va_end(argptr);
+	if (!format)
+		return;
 
-		if ((error_msg =  malloc(size))) {
-			va_start(argptr, format);
-			vsprintf(error_msg, format, argptr);
-			va_end(argptr);
-		}
+	va_list ap;
+
+	va_start(ap, format);
+	int size = vsnprintf(NULL, 0, format, ap) + 1 /* NUL */;
+	va_end(ap);
+
+	if ((error_msg =  malloc(size))) {
+		va_start(ap, format);
+		vsprintf(error_msg, format, ap);
+		va_end(ap);
 	}
+
+#if 0
+	va_start(ap, format);
+	vfprintf(stderr, format, ap);
+	va_end(ap);
+#endif
 }
