@@ -167,6 +167,11 @@ struct Download {
 static Download **downloads;
 static size_t num_downloads;
 
+typedef struct {
+	size_t count;
+	Download *downloads[];
+} Selection;
+
 static struct {
 	uint64_t download_speed;
 	uint64_t upload_speed;
@@ -508,11 +513,11 @@ find_download_by_gid(char const *gid, char const **endptr)
 {
 	char const *p = gid;
 
-	if (!islxdigit(*p))
+	if (!islxdigit(*p++))
 		return NULL;
 
 	uint8_t n = 0;
-	while (++n < 16 && islxdigit(*++p));
+	while (++n < 16 && islxdigit(*p++));
 
 	if (endptr)
 		*endptr = p;
@@ -538,7 +543,7 @@ get_download_by_gid(char const *gid)
 			return dd;
 
 	/* No new downloads are accepted. */
-	if (num_selects == SIZE_MAX)
+	if (SIZE_MAX == num_selects)
 		return NULL;
 
 	if (!(dd = new_download()))
@@ -808,11 +813,6 @@ clear_rpc_requests(void)
 		}
 	}
 }
-
-typedef struct {
-	size_t count;
-	Download *downloads[];
-} Selection;
 
 static void
 fetch_options(Selection *s, bool all, bool user);
@@ -3391,9 +3391,9 @@ parse_selection_options(JSONNode const *result, Selection const *s, FILE *stream
 	} else {
 		size_t i = 0;
 		assert(json_length(result) == s->count);
-		for (JSONNode const *node = json_first(result);
-		     node;
-		     (node = json_next(node)), ++i)
+		for (result = json_first(result);
+		     result;
+		     (result = json_next(result)), ++i)
 		{
 			Download *d = s->downloads[i];
 			if (!upgrade_download(d, NULL))
@@ -3404,7 +3404,7 @@ parse_selection_options(JSONNode const *result, Selection const *s, FILE *stream
 				print_download(d, stream);
 			}
 
-			JSONNode const *options = json_children(node);
+			JSONNode const *options = json_children(result);
 			for (JSONNode const *option = json_first(options);
 			     option;
 			     option = json_next(option))
@@ -3849,7 +3849,6 @@ handle_download_remove(JSONNode const *result, Selection *s)
 	if (result) {
 		for (size_t i = 0; i < s->count; ++i) {
 			Download *d = s->downloads[i], **dd;
-
 			if (upgrade_download(d, &dd))
 				delete_download_at(dd);
 		}
@@ -3868,7 +3867,7 @@ remove_download(void)
 	if (!(rpc = new_rpc()))
 		return;
 
-	Selection *s = get_selection(false);
+	Selection *s = get_selection(!!num_selects);
 
 	rpc->handler = (RPCHandler)handle_download_remove;
 	rpc->arg = s;
@@ -3879,10 +3878,9 @@ remove_download(void)
 		Download *d = s->downloads[i];
 
 		int res = run_action(d, "D");
-		/* Custom action succeed. */
 		if (!res)
 			continue;
-		/* Custom action failed, avoid further deletions. */
+		/* Avoid further deletions on failure. */
 		else if (0 < res)
 			break;
 
@@ -3899,6 +3897,7 @@ remove_download(void)
 	do_rpc(rpc);
 
 	draw_statusline();
+	refresh();
 }
 
 static void
@@ -4029,7 +4028,7 @@ fetch_files(Selection *s)
 
 	for (size_t i = 0; i < arg->num_has_tell_status;) {
 		Download *d = s->downloads[i];
-		if (d->num_files) {
+		if (0 < d->num_files) {
 			/* Order downloads without files at first to avoid an
 			 * allocation. */
 			Download **p = &s->downloads[--arg->num_has_tell_status];
@@ -4167,22 +4166,23 @@ select_files(Selection *s, bool all)
 		if ('#' == line[0])
 			continue;
 
-		uint32_t file_index;
 		Download *d;
+		char const *p;
 		if (1 < s->count) {
-			char const *p;
 			d = find_download_by_gid(line, &p);
 			if (!d)
 				continue;
-
-			int n = sscanf(p, "_%"SCNu32, &file_index);
-			if (n <= 0)
+			if ('_' != *p)
 				continue;
+			++p;
 		} else {
 			d = s->downloads[0];
-			if (1 != sscanf(line, "%"SCNu32, &file_index))
-				continue;
+			p = line;
 		}
+
+		uint32_t file_index;
+		if (1 != sscanf(p, "%"SCNu32, &file_index))
+			continue;
 		--file_index;
 
 		if (d->num_files <= file_index)
@@ -4237,13 +4237,11 @@ select_files(Selection *s, bool all)
 		}
 
 		begin_rpc_multicall_method("aria2.changeOption", d);
-
 		/* "options" */
 		json_write_beginobj(jw);
 		json_write_key(jw, "select-file");
-		json_write_str(jw, value ? value + 1 : "");
+		json_write_str(jw, value ? value + 1 /* Skip initial ",". */ : "");
 		json_write_endobj(jw);
-
 		end_rpc_multicall_method();
 
 		free(value);
@@ -4368,6 +4366,36 @@ read_stdin(void)
 		case 'k':
 		case KEY_UP:
 			--selidx;
+			draw_cursor();
+			refresh();
+			break;
+
+		case KEY_MOUSE:
+			if (getmouse(&event) != OK)
+				break;
+
+			/*MAN(KEYS)
+			 * .TP
+			 * .B MouseScroll
+			 * Move cursor.
+			 */
+#ifdef BUTTON5_PRESSED
+			if (event.bstate & BUTTON4_PRESSED)
+				selidx -= VIEWS[1] == view ? 5 : 1;
+			else if (event.bstate & BUTTON5_PRESSED)
+				selidx += VIEWS[1] == view ? 5 : 1;
+			else
+#endif
+			/*MAN(KEYS)
+			 * .TP
+			 * .B MouseDown
+			 * Move cursor.
+			 */
+			if (((BUTTON1_PRESSED | BUTTON3_PRESSED) & event.bstate) &&
+			    VIEWS[1] == view &&
+			    event.y < getmainheight())
+				selidx = topidx + event.y;
+
 			draw_cursor();
 			refresh();
 			break;
@@ -4658,7 +4686,7 @@ read_stdin(void)
 		 * .BR = ,\ / ,\ ?
 		 * Select downloads.
 		 * .IP
-		 * When only a subset of all downloads are displayed an
+		 * When only a subset of all downloads are displayed, an
 		 * .BR = -sign
 		 * is shown at the status bar.
 		 * .IP
@@ -4689,8 +4717,19 @@ read_stdin(void)
 		/*MAN(KEYS)
 		 * .TP
 		 * .BR D ,\  Del
-		 * If there is an mode for \*(lqD\*(rq execute it, otherwise
+		 * If there is an action for \*(lqD\*(rq execute it, otherwise
 		 * remove a non-active download.
+		 * .IP
+		 * Because it exists only as an upper case command its
+		 * behaviour slightly differs:
+		 * .RS
+		 * .IP \(bu
+		 * By default, delete a single download if selection is not
+		 * active.
+		 * .IP \(bu
+		 * Delete all downloads if selection is active. Refer to
+		 * .BR = .
+		 * .RE
 		 */
 		case 'D':
 		case KEY_DC: /* Delete. */
@@ -4741,7 +4780,15 @@ read_stdin(void)
 		/*MAN(KEYS)
 		 * .TP
 		 * .BR q ,\  Esc
-		 * Return to default view OR clear selection OR quit program.
+		 * Do one of the followings in this order:
+		 * .RS
+		 * .IP EITHER
+		 * Return to default view
+		 * .IP OR
+		 * Clear selection
+		 * .IP OR
+		 * Quit program.
+		 * .RE
 		 */
 		case 'q':
 		case CONTROL('['):
@@ -4772,7 +4819,7 @@ read_stdin(void)
 		/*MAN(KEYS)
 		 * .TP
 		 * .B Q
-		 * Shut down aria2, if action \*(lqQ\*(rq does not exist or
+		 * Shut down aria2 if action \*(lqQ\*(rq does not exist or
 		 * terminated with success.
 		 */
 		case 'Q':
@@ -4797,36 +4844,6 @@ read_stdin(void)
 		 */
 		case CONTROL('C'):
 			exit(EXIT_FAILURE);
-
-		case KEY_MOUSE:
-			if (getmouse(&event) != OK)
-				break;
-
-			/*MAN(KEYS)
-			 * .TP
-			 * .B MouseScroll
-			 * Move cursor.
-			 */
-#ifdef BUTTON5_PRESSED
-			if (event.bstate & BUTTON4_PRESSED)
-				selidx -= VIEWS[1] == view ? 5 : 1;
-			else if (event.bstate & BUTTON5_PRESSED)
-				selidx += VIEWS[1] == view ? 5 : 1;
-			else
-#endif
-			/*MAN(KEYS)
-			 * .TP
-			 * .B MouseDown
-			 * Move cursor.
-			 */
-			if (((BUTTON1_PRESSED | BUTTON3_PRESSED) & event.bstate) &&
-			    VIEWS[1] == view &&
-			    event.y < getmainheight())
-				selidx = topidx + event.y;
-
-			draw_cursor();
-			refresh();
-			break;
 
 		/*MAN(KEYS)
 		 * .TP
