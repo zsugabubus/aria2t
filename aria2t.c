@@ -3642,21 +3642,18 @@ add_downloads(char cmd)
 	size_t line_size = 0;
 	ssize_t line_len;
 
-	for (;;) {
-		if ((line_len = getline(&line, &line_size, stream)) < 0)
-			break;
-
-		char *uri, *next_uri;
+next_line:
+	for (line_len = getline(&line, &line_size, stream); 0 <= line_len;) {
 		char *b64str = NULL;
 		enum { URI, TORRENT, METALINK } type;
 
-		if (0 < line_len && line[line_len - 1] == '\n')
+		if (0 < line_len && '\n' == line[line_len - 1])
 			line[--line_len] = '\0';
 
 		if (line_len <= 0)
-			continue;
+			goto next_line;
 
-		uri = line;
+		char *uri = line, *next_uri;
 		if ((next_uri = strchr(uri, '\t')))
 			*next_uri++ = '\0';
 
@@ -3722,11 +3719,11 @@ add_downloads(char cmd)
 		/* "options" */
 		json_write_beginobj(jw);
 		while (0 <= (line_len = getline(&line, &line_size, stream))) {
+			if (0 < line_len && '\n' == line[line_len - 1])
+				line[--line_len] = '\0';
+
 			if (line_len <= 0)
 				continue;
-
-			if (line[line_len - 1] == '\n')
-				line[--line_len] = '\0';
 
 			char *name = line;
 			while (isspace(*name))
