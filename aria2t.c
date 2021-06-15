@@ -4621,7 +4621,7 @@ read_stdin(void)
 		 * Note that URIs that end with
 		 * .BR .torrent \ and\  .meta4 \ or\  .metalink
 		 * and refer to a readable file on the local filesystem are uploaded to
-		 * aria2 as a BLOB.
+		 * aria2 as a blob.
 		 */
 		case 'a':
 		case 'A':
