@@ -962,7 +962,7 @@ parse_peer_id(Peer *p, char const *peer_id)
 static void
 draw_progress(Download const *d, uint8_t const *progress, uint64_t offset, uint64_t end_offset)
 {
-	uint8_t const
+	static uint8_t const
 	SYMBOL_MAP[UINT8_MAX + 1] =
 	{
 #define POPCNT8(x) (((((x) * 0x0002000400080010ULL) & 0x1111111111111111ULL) * 0x1111111111111111ULL) >> 60)
