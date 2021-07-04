@@ -3435,7 +3435,7 @@ static void
 handle_option_change(JSONNode const *result, Selection *s)
 {
 	if (result)
-		fetch_options(s, false /* Ignored. */, false);
+		fetch_options(s, true /* !s => fetch_options(all := true); otherwise ignored */, false);
 	else
 		free_selection(s);
 }
