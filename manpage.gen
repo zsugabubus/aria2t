@@ -1,6 +1,6 @@
 #!/bin/sh -e
 MANPAGE_IN=${1?Missing template manual page}
-MANPAGE=${MANPAGE_IN%.in}
+MANPAGE=${MANPAGE_IN%.template}
 shift
 test ! "$#" = 0 || printf >&2 '%s: warning: no inputs for %s\n' "$0" "$MANPAGE"
 

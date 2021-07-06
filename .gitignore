@@ -1,6 +1,3 @@
-# generated
-aria2t.1
-keys.in
-
-# binary
 aria2t
+aria2t.1
+*.inc

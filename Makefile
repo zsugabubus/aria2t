@@ -23,10 +23,10 @@ VERSION := $(shell git describe --always --tags --dirty --match 'v*')
 
 all : $(TARGET)
 
-keys.in : keys.gen $(TARGET).c
+keys.c.inc : keys.gen $(TARGET).c
 	./$+
 
-$(TARGET).1 : % : manpage.gen %.in $(TARGET).c
+$(TARGET).1 : % : manpage.gen %.template $(TARGET).c
 	./$+
 
 run : $(TARGET)
@@ -38,7 +38,7 @@ jeezson/% :
 fourmat/% :
 	git submodule update --init fourmat
 
-$(TARGET) : %: keys.in %.c program.? websocket.? b64.? jeezson/jeezson.? fourmat/fourmat.? Makefile
+$(TARGET) : %: keys.c.inc %.c program.? websocket.? b64.? jeezson/jeezson.? fourmat/fourmat.? Makefile
 	$(CC) -o $@ -DVERSION=\"$(VERSION)\" $(CFLAGS) $(LDFLAGS) $(LDLIBS) $@.c program.c websocket.c b64.c jeezson/jeezson.c fourmat/fourmat.c
 
 installdirs :
@@ -59,7 +59,7 @@ uninstall :
 	$(RM) $(DESTDIR)$(man1dir)/$(TARGET).1*
 
 clean :
-	$(RM) keys.in $(TARGET)
+	$(RM) $(TARGET) keys.c.inc $(TARGET).1
 	$(MAKE) -C jeezson clean
 	$(MAKE) -C fourmat clean
 

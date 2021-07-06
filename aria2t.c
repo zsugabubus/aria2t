@@ -28,7 +28,7 @@
 #include "jeezson/jeezson.h"
 #include "fourmat/fourmat.h"
 
-#include "keys.in"
+#include "keys.c.inc"
 
 #define addspaces(n) addnstr("                                          "/*31+5+6=42*/, n);
 
