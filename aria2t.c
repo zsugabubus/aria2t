@@ -3846,13 +3846,11 @@ handle_download_remove(JSONNode const *result, Selection *s)
 {
 	if (result) {
 		for (size_t i = 0; i < s->count; ++i) {
-			Download *d = s->downloads[i], **dd;
-			if (upgrade_download(d, &dd))
-				delete_download_at(dd);
+			Download *d = s->downloads[i];
+			d->status = -abs(d->status);
 		}
 
-		on_downloads_change(true);
-		refresh();
+		update_downloads();
 	}
 
 	free_selection(s);
