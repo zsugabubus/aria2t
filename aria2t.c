@@ -3321,20 +3321,20 @@ out:
 static int
 fileout(bool must_edit)
 {
-	char const *cmd;
-	if (must_edit) {
-		(cmd = getenv("VISUAL")) ||
-		(cmd = getenv("EDITOR")) ||
-		(cmd = "vi");
-	} else {
-		(cmd = getenv("PAGER")) ||
-		(cmd = "less");
-	}
-
 	endwin();
 
 	pid_t pid;
 	if (!(pid = vfork())) {
+		char const *cmd;
+		if (must_edit) {
+			(cmd = getenv("VISUAL")) ||
+			(cmd = getenv("EDITOR")) ||
+			(cmd = "vi");
+		} else {
+			(cmd = getenv("PAGER")) ||
+			(cmd = "less");
+		}
+
 		execlp(cmd, cmd, session_file, NULL);
 		_exit(127);
 	}
