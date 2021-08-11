@@ -213,8 +213,8 @@ static char session_file[PATH_MAX];
 static bool is_local; /* Server runs on local host? */
 
 struct pollfd pfds[2];
-static struct timespec period;
-static void(*periodic)(void);
+static struct timespec interval;
+static void(*on_timeout)(void);
 
 typedef void(*RPCHandler)(JSONNode const *result, void *arg);
 typedef struct {
@@ -664,7 +664,7 @@ static void
 on_downloads_change(bool stickycurs);
 
 static void
-update(void);
+update_downloads(void);
 
 static bool
 download_insufficient(Download *d)
@@ -725,7 +725,7 @@ handle_notification(char const *method, JSONNode const *event)
 
 		/* in a perfect world we should update only this one download */
 		if (download_insufficient(d))
-			update();
+			update_downloads();
 	}
 }
 
@@ -1796,19 +1796,21 @@ parse_downloads(JSONNode const *result, UpdateArg *arg)
 	}
 
 	if (some_insufficient)
-		update();
+		update_downloads();
 }
 
 static void
-set_periodic_update(void)
+arm_periodic_update_timer(void)
 {
 	int any_activity =
 		0 < global.download_speed ||
 		0 < global.upload_speed;
 
-	periodic = update;
-	period.tv_sec = any_activity ? 1 : 3;
-	period.tv_nsec = 271 * 1000000;
+	on_timeout = update_downloads;
+	interval = (struct timespec){
+		.tv_sec = any_activity ? 1 : 3,
+		.tv_nsec = 271 * 1000000,
+	};
 }
 
 static void
@@ -1831,7 +1833,7 @@ handle_update(JSONNode const *result, UpdateArg *arg)
 	refresh();
 
 out:
-	set_periodic_update();
+	arm_periodic_update_timer();
 
 	free(arg);
 }
@@ -1843,10 +1845,10 @@ getmainheight(void)
 }
 
 static void
-update(void)
+update_downloads(void)
 {
-	/* request update only if it was scheduled */
-	if (update != periodic)
+	/* Request update only if it was scheduled. */
+	if (update_downloads != on_timeout)
 		return;
 
 	RPCRequest *rpc;
@@ -2000,7 +2002,7 @@ update(void)
 	end_rpc_multicall();
 
 	if (do_rpc(rpc))
-		periodic = NULL;
+		on_timeout = NULL;
 }
 
 
@@ -2009,7 +2011,7 @@ handle_position_change(JSONNode const *result, Download *d)
 {
 	if (result) {
 		queue_changed();
-		update();
+		update_downloads();
 
 		d->queue_index = result->num;
 		on_downloads_change(true);
@@ -2422,7 +2424,7 @@ draw_files(void)
 			/* linewrap */
 			move(y, 0);
 		} else {
-			update();
+			update_downloads();
 		}
 
 	} else {
@@ -2959,7 +2961,7 @@ draw_cursor(void)
 		tui.topidx = topidx;
 		on_scroll_changed();
 		/* update now seen downloads */
-		update();
+		update_downloads();
 	}
 
 	if (tui.selidx != selidx) {
@@ -3186,9 +3188,8 @@ handle_update_all(JSONNode const *result, void *arg)
 	on_downloads_change(false);
 	refresh();
 
-	/* Schedule updates and request one now. */
-	set_periodic_update();
-	update();
+	arm_periodic_update_timer();
+	update_downloads();
 }
 
 static void
@@ -3905,7 +3906,7 @@ switch_view(int next)
 		tui.selidx = -1; /* force redraw */
 	}
 
-	update();
+	update_downloads();
 	draw_all();
 	refresh();
 }
@@ -4954,7 +4955,7 @@ on_ws_open(void)
 	pfds[1].fd = ws_fileno();
 	pfds[1].events = POLLIN;
 
-	periodic = NULL;
+	on_timeout = NULL;
 
 	clear_error();
 
@@ -4976,12 +4977,13 @@ on_ws_close(void)
 	if (!errno)
 		exit(EXIT_SUCCESS);
 
-	if (try_connect != periodic) {
-		periodic = try_connect;
-		period.tv_sec = 1;
-		period.tv_nsec = 0;
+	if (try_connect != on_timeout) {
+		on_timeout = try_connect;
+		interval = (struct timespec){
+			.tv_sec = 1,
+		};
 	} else {
-		period.tv_sec *= 2;
+		interval.tv_sec *= 2;
 	}
 
 	clear_rpc_requests();
@@ -5146,9 +5148,9 @@ main(int argc, char *argv[])
 	sigemptyset(&ss);
 
 	for (;;) {
-		switch (ppoll(pfds, ARRAY_SIZE(pfds), periodic ? &period : NULL, &ss)) {
+		switch (ppoll(pfds, ARRAY_SIZE(pfds), on_timeout ? &interval : NULL, &ss)) {
 		case 0:
-			periodic();
+			on_timeout();
 			break;
 
 		case -1:
