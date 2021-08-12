@@ -3322,7 +3322,7 @@ out:
 }
 
 static int
-fileout(bool must_edit)
+fileout(bool must_edit, size_t select_lnum)
 {
 	endwin();
 
@@ -3338,7 +3338,18 @@ fileout(bool must_edit)
 			(cmd = "less");
 		}
 
-		execlp(cmd, cmd, session_file, NULL);
+		char buf[22];
+		char const *lnum_arg = NULL;
+
+		if (select_lnum &&
+		    (strstr(cmd, "vi") ||
+		     strstr(cmd, "less")))
+		{
+			sprintf(buf, "+%"PRIu64, select_lnum);
+			lnum_arg = buf;
+		}
+
+		execlp(cmd, cmd, session_file, lnum_arg, NULL);
 		_exit(127);
 	}
 
@@ -3516,7 +3527,7 @@ handle_option_show(JSONNode const *result, Selection *s)
 
 	int status;
 	if ((status = run_action(NULL, s ? "i" : "I")) < 0)
-		status = fileout(false);
+		status = fileout(false, 0);
 
 	if (status)
 		goto out;
@@ -3627,7 +3638,7 @@ add_downloads(char cmd)
 
 	int status;
 	if ((status = run_action(NULL, "%c", cmd)) < 0)
-		status = fileout(true);
+		status = fileout(true, 0);
 
 	FILE *stream;
 	if (status ||
@@ -4137,7 +4148,7 @@ select_files(Selection *s, bool all)
 
 	int status;
 	if ((status = run_action(1 == s->count ? s->downloads[0] : NULL, "f")) < 0)
-		status = fileout(true);
+		status = fileout(true, 0);
 
 	if (status) {
 		free_rpc(rpc);
@@ -4257,18 +4268,22 @@ plumb_downloads(char cmd)
 	if (!(stream = open_output()))
 		return EXIT_FAILURE;
 
+	size_t select_lnum = 0;
 	for (size_t i = 0; i < num_downloads; ++i) {
 		Download *d = downloads[i];
 		print_download(d, stream);
-		if (D_ERROR == abs(d->status))
+		select_lnum += i <= (size_t)selidx;
+		if (D_ERROR == abs(d->status)) {
 			fprintf(stream, "# %s\n", d->error_msg);
+			select_lnum += i < (size_t)selidx;
+		}
 	}
 
 	fclose(stream);
 
 	int status;
 	if ((status = run_action(NULL, "%c", cmd)) < 0)
-		status = fileout(true);
+		status = fileout(true, select_lnum);
 
 	return status;
 }
