@@ -5124,7 +5124,7 @@ main(int argc, char *argv[])
 	use_default_colors();
 	fill_pairs();
 	/* No input buffering. */
-	raw();
+	cbreak();
 	/* No input echo. */
 	noecho();
 	/* Do not translate '\n's. */
