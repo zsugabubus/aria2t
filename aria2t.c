@@ -3228,22 +3228,16 @@ begwin(void)
 static int
 xwaitpid(pid_t pid)
 {
-	for (;;) {
-		int status;
-		if (waitpid(pid, &status, 0) < 0) {
-			if (EINTR == errno)
-				continue;
+	int status;
+	if (waitpid(pid, &status, 0) < 0)
+		return 1;
 
-			return 1;
-		}
-
-		if (WIFEXITED(status) && 127 == WEXITSTATUS(status))
-			return -1;
-		else if (WIFEXITED(status) && EXIT_SUCCESS == WEXITSTATUS(status))
-			return 0;
-		else
-			return 1;
-	}
+	if (WIFEXITED(status) && 127 == WEXITSTATUS(status))
+		return -1;
+	else if (WIFEXITED(status) && EXIT_SUCCESS == WEXITSTATUS(status))
+		return 0;
+	else
+		return 1;
 }
 
 static int
