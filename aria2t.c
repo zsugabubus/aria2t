@@ -5040,14 +5040,6 @@ handle_signal_quit(int signum)
 }
 
 static void
-handle_signal_disconnect(int signum)
-{
-	(void)signum;
-
-	ws_close();
-}
-
-static void
 setup_sighandlers(void)
 {
 	struct sigaction sa;
@@ -5055,7 +5047,7 @@ setup_sighandlers(void)
 	/* Block all signals by default. */
 	sigfillset(&sa.sa_mask);
 	sigprocmask(SIG_BLOCK, &sa.sa_mask, NULL);
-	sa.sa_flags = SA_RESTART | SA_NOCLDSTOP | SA_NOCLDWAIT;
+	sa.sa_flags = SA_RESTART;
 
 	sa.sa_handler = handle_signal_resize;
 	sigaction(SIGWINCH, &sa, NULL);
@@ -5067,7 +5059,7 @@ setup_sighandlers(void)
 	sigaction(SIGKILL, &sa, NULL);
 	sigaction(SIGQUIT, &sa, NULL);
 
-	sa.sa_handler = handle_signal_disconnect;
+	sa.sa_handler = SIG_IGN;
 	sigaction(SIGPIPE, &sa, NULL);
 }
 
