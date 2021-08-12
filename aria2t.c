@@ -5071,6 +5071,13 @@ main(int argc, char *argv[])
 
 	for (int argi = 1; argi < argc;) {
 		char const *arg = argv[argi++];
+		/*MAN(OPTIONS)
+		 * .TP
+		 * \fB\-\-select\fR { \fIPATH\fR | \fIGID\fR }...
+		 * Select downloads by their \fIGID\fR or by matching \fIPATH\fR prefix. If
+		 * omitted, every download is selected. Refer to
+		 * .BR = .
+		 */
 		if (!strcmp(arg, "--select")) {
 			if (argc <= argi)
 				goto show_usage;
@@ -5079,8 +5086,14 @@ main(int argc, char *argv[])
 			selects = (char const **)&argv[argi];
 			while (++argi, argv[argi] && '-' != *argv[argi])
 				++num_selects;
-		} else if (!strcmp(arg, "--version")) {
-			fprintf(stderr, "aria2t "VERSION"\n");
+		}
+		/*MAN(OPTIONS)
+		 * .TP
+		 * .B --version
+		 * Print version and exit.
+		 */
+		else if (!strcmp(arg, "--version")) {
+			puts("aria2t-"VERSION);
 			return EXIT_SUCCESS;
 		} else {
 		show_usage:
