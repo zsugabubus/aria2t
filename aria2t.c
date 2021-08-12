@@ -834,10 +834,12 @@ static bool
 do_rpc(RPCRequest *rpc)
 {
 	json_write_endobj(jw);
-	if (ws_send(jw->buf, jw->buf_size) < 0) {
+
+	int rc = ws_send(jw->buf, jw->buf_size);
+	if (rc < 0) {
 		free_rpc(rpc);
 
-		show_error("write: %s", strerror(errno));
+		show_error("write: %s", strerror(-rc));
 		draw_statusline();
 
 		return false;
@@ -5040,20 +5042,10 @@ static void
 setup_sighandlers(void)
 {
 	struct sigaction sa;
-	sigset_t ss;
 
-	sigemptyset(&ss);
-	sigaddset(&ss, SIGWINCH);
-	sigaddset(&ss, SIGINT);
-	sigaddset(&ss, SIGHUP);
-	sigaddset(&ss, SIGTERM);
-	sigaddset(&ss, SIGQUIT);
-	sigaddset(&ss, SIGPIPE);
-
-	sigprocmask(SIG_BLOCK, &ss, NULL);
-
-	/* when process signal handlers block every other signals */
+	/* Block all signals by default. */
 	sigfillset(&sa.sa_mask);
+	sigprocmask(SIG_BLOCK, &sa.sa_mask, NULL);
 	sa.sa_flags = SA_RESTART | SA_NOCLDSTOP | SA_NOCLDWAIT;
 
 	sa.sa_handler = handle_signal_resize;
