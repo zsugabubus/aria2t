@@ -30,7 +30,7 @@
 
 #include "keys.c.inc"
 
-#define addspaces(n) addnstr("                                          "/*31+5+6=42*/, n);
+#define addspaces(n) printw("%*s", n, "");
 
 enum {
 	COLOR_DOWN = 1,
@@ -2264,7 +2264,11 @@ draw_peer(Download const *d, size_t i, int *y)
 static void
 draw_our_peer(Download const *d, int *y)
 {
-	mvprintw((*y)++, 0, "  %*.*s%*.s", -sizeof global.external_ip, sizeof global.external_ip, global.external_ip, 6 + PEER_INFO_WIDTH, "");
+	mvprintw((*y)++, 0, "  %*.*s%*.s",
+			(int)-sizeof global.external_ip,
+			(int)sizeof global.external_ip,
+			global.external_ip,
+			6 + PEER_INFO_WIDTH, "");
 #if 0
 	Download D = {
 		.num_pieces = 8,
@@ -2960,13 +2964,16 @@ draw_cursor(void)
 	if (tui.topidx == topidx) {
 		move(VIEWS[1] == view ? selidx - topidx : 0, curx);
 	} else {
+		scrollok(stdscr, TRUE);
+		scrl(topidx - tui.topidx);
+		scrollok(stdscr, FALSE);
 		tui.topidx = topidx;
 		on_scroll_changed();
-		/* update now seen downloads */
+		/* Update now seen downloads. */
 		update_downloads();
 	}
 
-	if (tui.selidx != selidx) {
+	if (tui.selidx != selidx || tui.topidx != topidx) {
 		tui.selidx = selidx;
 		draw_statusline();
 	}
@@ -3023,10 +3030,11 @@ draw_statusline(void)
 	move(y, 0);
 	attr_set(A_NORMAL, 0, NULL);
 
-	printw("%c%c %4d/%d",
+	printw("%c%c %4d/%zu",
 			view,
 			num_selects ? '=' : '\0',
-			0 < num_downloads ? selidx + 1 : 0, num_downloads);
+			0 < num_downloads ? selidx + 1 : 0,
+			num_downloads);
 
 	for (i = D_UNKNOWN; i < D_NB; ++i) {
 		if (!global.num_perstatus[i])
@@ -4928,10 +4936,20 @@ handle_remote_info(JSONNode const *result, void *arg)
 		return;
 
 	result = json_children(result);
+	if (JSONT_OBJECT == json_type(result)) {
+		handle_error(result);
+		return;
+	}
+
 	node = json_children(result);
 	parse_session_info(node);
 
 	result = json_next(result);
+	if (JSONT_OBJECT == json_type(result)) {
+		handle_error(result);
+		return;
+	}
+
 	node = json_children(result);
 	parse_options(node, NULL);
 
@@ -5124,22 +5142,14 @@ main(int argc, char *argv[])
 	start_color();
 	use_default_colors();
 	fill_pairs();
-	/* No input buffering. */
-	cbreak();
-	/* No input echo. */
-	noecho();
-	/* Do not translate '\n's. */
-	nonl();
-	/* Make getch() non-blocking. */
-	nodelay(stdscr, TRUE);
-	/* Catch special keys. */
-	keypad(stdscr, TRUE);
-	/* 8-bit inputs. */
-	meta(stdscr, TRUE);
-	/* Listen for all mouse events. */
-	mousemask(ALL_MOUSE_EVENTS, NULL);
-	/* Be immediate. */
-	mouseinterval(0);
+	cbreak(); /* No input buffering. */
+	noecho(); /* No input echo. */
+	nonl(); /* Do not translate '\n's. */
+	nodelay(stdscr, TRUE); /* Make getch() non-blocking. */
+	keypad(stdscr, TRUE); /* Catch special keys. */
+	meta(stdscr, TRUE); /* 8-bit input. */
+	mousemask(ALL_MOUSE_EVENTS, NULL); /* Listen for all mouse events. */
+	mouseinterval(0); /* Be immediate. */
 
 	update_terminfo();
 

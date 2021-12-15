@@ -29,9 +29,6 @@ keys.c.inc : keys.gen $(TARGET).c
 $(TARGET).1 : % : manpage.gen %.template $(TARGET).c
 	./$+
 
-run : $(TARGET)
-	gdb $(TARGET) -ex run
-
 jeezson/% :
 	git submodule update --init jeezson
 
