@@ -17,7 +17,7 @@ minimal but complete.
 * `cc -std=c11` (Build only.)
 * `coreutils` (Build only.)
 * `gperf` (Build only.)
-* `make` (Build only.)
+* `meson` (Build only.)
 * `sed` (Build only.)
 * `ncursesw`
 
@@ -26,8 +26,9 @@ minimal but complete.
 ```
 git clone https://github.com/zsugabubus/aria2t &&
 cd aria2t &&
-make &&
-make install
+meson build &&
+meson compile -C build &&
+meson install -C build
 ```
 
 ## Getting started

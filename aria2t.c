@@ -28,7 +28,7 @@
 #include "jeezson/jeezson.h"
 #include "fourmat/fourmat.h"
 
-#include "keys.c.inc"
+#include "keys.h"
 
 #define addspaces(n) printw("%*s", n, "");
 
