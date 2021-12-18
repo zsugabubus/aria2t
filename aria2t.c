@@ -4428,7 +4428,7 @@ read_stdin(void)
 		/*MAN(KEYS)
 		 * .TP
 		 * .BR l
-		 * Go to first children.
+		 * Go to first child.
 		 */
 		case 'l':
 			if (0 < num_downloads)
