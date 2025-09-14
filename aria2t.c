@@ -22,6 +22,11 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifdef __APPLE__
+# include <signal.h>
+# include <xlocale.h>
+#endif
+
 #include "program.h"
 #include "websocket.h"
 #include "b64.h"
@@ -213,7 +218,7 @@ static char session_file[PATH_MAX];
 static bool is_local; /* Server runs on local host? */
 
 struct pollfd pfds[2];
-static struct timespec interval;
+static int interval;
 static void(*on_timeout)(void);
 
 typedef void(*RPCHandler)(JSONNode const *result, void *arg);
@@ -862,11 +867,19 @@ update_download_tags(Download *d)
 		char pathbuf[PATH_MAX];
 
 		snprintf(pathbuf, sizeof pathbuf, "%s/%s", d->dir, d->name);
-		size = getxattr(pathbuf, tags_xattr, tags, sizeof tags - 1);
+		size = getxattr(pathbuf, tags_xattr, tags, sizeof tags - 1
+	#ifdef __APPLE__
+		, 0, 0
+	#endif
+		);
 	}
 
 	if (size < 0 && 0 < d->num_files && d->files[0].path)
-		size = getxattr(d->files[0].path, tags_xattr, tags, sizeof tags - 1);
+		size = getxattr(d->files[0].path, tags_xattr, tags, sizeof tags - 1
+	#ifdef __APPLE__
+		, 0, 0
+	#endif
+		);
 
 	free(d->tags);
 	d->tags = 0 < size ? malloc(size + 1 /* NUL */) : NULL;
@@ -1809,10 +1822,7 @@ arm_periodic_update_timer(void)
 		0 < global.upload_speed;
 
 	on_timeout = update_downloads;
-	interval = (struct timespec){
-		.tv_sec = any_activity ? 1 : 3,
-		.tv_nsec = 271 * 1000000,
-	};
+	interval = any_activity ? 1271 : 3271;
 }
 
 static void
@@ -5006,11 +5016,9 @@ on_ws_close(void)
 
 	if (try_connect != on_timeout) {
 		on_timeout = try_connect;
-		interval = (struct timespec){
-			.tv_sec = 1,
-		};
+		interval = 1000;
 	} else {
-		interval.tv_sec *= 2;
+		interval *= 2;
 	}
 
 	clear_rpc_requests();
@@ -5161,8 +5169,13 @@ main(int argc, char *argv[])
 	sigset_t ss;
 	sigemptyset(&ss);
 
+	sigset_t origmask;
+
 	for (;;) {
-		switch (ppoll(pfds, ARRAY_SIZE(pfds), on_timeout ? &interval : NULL, &ss)) {
+		sigprocmask(SIG_SETMASK, &ss, &origmask);
+		int ready = poll(pfds, ARRAY_SIZE(pfds), on_timeout ? interval : -1);
+		sigprocmask(SIG_SETMASK, &origmask, NULL);
+		switch (ready) {
 		case 0:
 			on_timeout();
 			break;
